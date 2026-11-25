@@ -297,7 +297,7 @@ export class SeafileRemote implements RemoteFS {
 			// make us write outside the vault ("..", absolute paths, path separators).
 			const name = String(e.name ?? "");
 			if (typeof e.id !== "string") return;
-			if (!name || name === "." || name === ".." || /[\\/\u0000]/.test(name)) return;
+			if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes(String.fromCharCode(0))) return;
 			const parentRel = this.rel(parentAbs);
 			if (parentRel.split("/").some((seg) => seg === ".." || seg === ".")) return;
 			const p = parentRel ? parentRel + "/" + e.name : e.name;

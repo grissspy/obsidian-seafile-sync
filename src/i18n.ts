@@ -90,5 +90,5 @@ function lang(): typeof en {
 }
 
 export function t(key: MsgKey, vars: Record<string, string | number> = {}): string {
-	return lang()[key].replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? ""));
+	return lang()[key].replace(/\{(\w+)\}/g, (_m: string, k: string) => String(vars[k] ?? ""));
 }

@@ -127,7 +127,8 @@ export default class SeafileSyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const saved = (await this.loadData()) as Partial<Settings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
 		let dirty = false;
 		if (!this.settings.secretId) {
 			this.settings.secretId = Math.random().toString(36).slice(2, 10);
