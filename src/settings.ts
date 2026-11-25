@@ -500,6 +500,7 @@ export class SeafileSettingTab extends PluginSettingTab {
 						name: L("Add", "Добавить"),
 						desc: L("Vault folder, library and (optionally) a folder in it.", "Папка хранилища, библиотека и (необязательно) папка в ней."),
 						render: (setting: Setting) => {
+							setting.settingEl.addClass("seafile-sync-extra-add");
 							setting.addText((tx) => tx.setPlaceholder(L("Vault folder", "Папка хранилища")).setValue(this.draft.local).onChange((v) => (this.draft.local = v.trim())));
 							setting.addDropdown((d) => {
 								d.addOption("", L("Library…", "Библиотека…"));

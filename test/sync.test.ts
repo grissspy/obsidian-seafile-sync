@@ -196,6 +196,8 @@ async function main() {
 	await A.sync();
 	check("guard asked", A.asked === 1);
 	check("guard skip keeps remote", server.get("/Vault/bulk/3.md") === "x3");
+	await A.sync();
+	check("guard asks again after skip, even with no new changes", A.asked === 2, A.asked);
 	A.deleteAnswer = "restore";
 	await A.sync();
 	check("guard restore", A.local.text("bulk/3.md") === "x3");
@@ -375,6 +377,26 @@ async function main() {
 		await W2.sync();
 		await W.sync();
 		check("prefix: delete propagates, outside untouched", !W.local.text("Work/plan.md") && W.local.text("main.md") === "main vault note");
+	}
+
+	// ---------------- history, trash, share links
+	{
+		const S4 = new MockSeafile();
+		const api = new SeafileApi(S4.http, "https://seaf.test", "T");
+		S4.put("/V/h.md", "one");
+		S4.put("/V/h.md", "two");
+		const h = await api.fileHistory(S4.repo, "/V/h.md");
+		check("history: newest first", h.items.length === 2 && h.items[0].op === "edit" && h.items[1].op === "create", h);
+		const old = new TextDecoder().decode(await api.downloadRevision(S4.repo, "/V/h.md", h.items[1].commitId));
+		check("history: old revision content", old === "one", old);
+		await api.deleteFile(S4.repo, "/V/h.md");
+		const tr = await api.trash(S4.repo);
+		check("trash lists deleted file", tr.items.length === 1 && tr.items[0].path === "/V/h.md" && !tr.items[0].isDir, tr);
+		await api.revert(S4.repo, tr.items[0].path, tr.items[0].commitId, false);
+		check("trash restore", S4.get("/V/h.md") === "two");
+		const l1 = await api.shareLink(S4.repo, "/V/h.md");
+		const l2 = await api.shareLink(S4.repo, "/V/h.md");
+		check("share link reused", l1 === l2 && l1.startsWith("https://"), [l1, l2]);
 	}
 
 	console.log(`\n${passes} passed, ${failures} failed`);

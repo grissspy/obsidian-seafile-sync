@@ -1,4 +1,4 @@
-import { App, debounce, Menu, Modal, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, debounce, Menu, Modal, moment, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AdapterBaseStore, ObsidianLocal } from "./local";
 import { t } from "./i18n";
 import { Http, SeafileApi, SeafileError, SeafileRemote } from "./seafile";
@@ -652,7 +652,7 @@ export default class SeafileSyncPlugin extends Plugin {
 			(kind === "sync" ? t("statusSyncing") : kind === "paused" ? t("statusPaused") : kind === "error" || kind === "offline" ? t("statusError") : t("statusIdle"));
 		this.statusEl.createSpan({ cls: "seafile-sync-label", text: label });
 		const last = this.lastResult
-			? t("tooltipLast", { time: new Date(this.lastResult.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), summary: this.lastSummary }) + "\n"
+			? t("tooltipLast", { time: moment(this.lastResult.at).format("LT"), summary: this.lastSummary }) + "\n"
 			: "";
 		this.statusEl.setAttr("aria-label", last + t("tooltip"));
 		this.statusEl.setAttr("data-tooltip-position", "top");
@@ -786,7 +786,7 @@ export default class SeafileSyncPlugin extends Plugin {
 			this.lastSummary = changed ? parts.join(" · ") : t("upToDate").replace(/^\S+ Seafile: /, "");
 			this.log(`done in ${secs}s: ${this.lastSummary}${result.conflicts ? `, ${result.conflicts} conflicts` : ""}${result.errors.length ? `, ${result.errors.length} errors` : ""}`);
 
-			const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+			const time = moment().format("LT");
 			const loud = s.notices === "all" || (reason === "manual" && s.notices !== "none");
 			if (result.errors.length) {
 				this.setStatus("error");

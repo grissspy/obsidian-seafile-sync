@@ -1,0 +1,81 @@
+name: E2E (real Obsidian)
+# Runs the latest Obsidian desktop app on Windows, Linux and macOS with the built plugin
+# and checks real syncing against a fake Seafile server (test/e2e).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      screenshots:
+        description: "Also take README screenshots"
+        type: boolean
+        default: false
+
+jobs:
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: node test/build-tests.mjs
+
+      - name: Download Obsidian (official release)
+        shell: bash
+        run: |
+          V=$(gh release view -R obsidianmd/obsidian-releases --json tagName -q .tagName | sed 's/^v//')
+          echo "Obsidian $V"
+          mkdir -p obs && cd obs
+          gh release download "v$V" -R obsidianmd/obsidian-releases -p "obsidian-$V.asar.gz"
+          gunzip "obsidian-$V.asar.gz"
+          echo "ASAR=$PWD/obsidian-$V.asar" >> $GITHUB_ENV
+          case "$RUNNER_OS" in
+            Linux)
+              gh release download "v$V" -R obsidianmd/obsidian-releases -p "Obsidian-$V.AppImage"
+              chmod +x "Obsidian-$V.AppImage" && "./Obsidian-$V.AppImage" --appimage-extract >/dev/null
+              echo "OBSIDIAN=$PWD/squashfs-root/obsidian" >> $GITHUB_ENV ;;
+            macOS)
+              gh release download "v$V" -R obsidianmd/obsidian-releases -p "Obsidian-$V.dmg"
+              hdiutil attach -nobrowse -mountpoint /Volumes/Obsidian "Obsidian-$V.dmg" >/dev/null
+              cp -R /Volumes/Obsidian/Obsidian.app ./Obsidian.app
+              echo "OBSIDIAN=$PWD/Obsidian.app/Contents/MacOS/Obsidian" >> $GITHUB_ENV ;;
+            Windows)
+              gh release download "v$V" -R obsidianmd/obsidian-releases -p "Obsidian-$V.exe"
+              "./Obsidian-$V.exe" /S
+              sleep 20
+              EXE=$(find "$(cygpath "$LOCALAPPDATA")/Programs" "$(cygpath "$PROGRAMFILES")" -maxdepth 3 -iname Obsidian.exe 2>/dev/null | head -1)
+              echo "Found $EXE"
+              echo "OBSIDIAN=$(cygpath -w "$EXE")" >> $GITHUB_ENV ;;
+          esac
+
+      - name: Run e2e
+        shell: bash
+        run: |
+          SHOTS=""
+          if [ "${{ inputs.screenshots }}" = "true" ] && [ "$RUNNER_OS" = "Linux" ]; then SHOTS="--shots shots"; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libnss3 libgbm1 libasound2t64 >/dev/null || true
+            xvfb-run -a -s "-screen 0 1440x900x24" node test/out/e2e.js --obsidian "$OBSIDIAN" --asar "$ASAR" $SHOTS
+          else
+            node test/out/e2e.js --obsidian "$OBSIDIAN" --asar "$ASAR" $SHOTS
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.screenshots
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: shots
+          if-no-files-found: ignore

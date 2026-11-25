@@ -7,7 +7,8 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
     "test": "node test/build-tests.mjs && node test/out/sync.test.js",
-    "version": "node version-bump.mjs && git add manifest.json versions.json"
+    "version": "node version-bump.mjs && git add manifest.json versions.json",
+    "e2e": "node test/build-tests.mjs && node test/out/e2e.js"
   },
   "license": "MIT",
   "devDependencies": {

@@ -208,6 +208,7 @@ export class SyncEngine {
 				}
 			} else if (answer === "skip") {
 				opt.log(`deletions postponed (${delL.length + delR.length} files)`);
+				this.retryNeeded = true; // ask again next time, even if nothing else changes
 				for (let i = actions.length - 1; i >= 0; i--) if (actions[i].k === "delLocal" || actions[i].k === "delRemote") actions.splice(i, 1);
 			}
 		}

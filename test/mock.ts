@@ -18,6 +18,22 @@ export class MockSeafile {
 	private idSeq = 0;
 	requests: string[] = [];
 	readonly repo = "repo-1";
+	/** Base URL of the fake file server (download/upload links point here). */
+	fsBase = "http://fs.test";
+	/** Name shown as the author of versions (e2e screenshots use a made-up one). */
+	author = "alex";
+	/** Every version of every file, by absolute path (for the history API). */
+	history = new Map<string, { commit: string; time: number; data: Uint8Array; op: string }[]>();
+	/** Deleted files and folders (for the trash API). */
+	trashed: { path: string; isDir: boolean; time: number; commit: string; data?: Uint8Array; files?: [string, Uint8Array][] }[] = [];
+	shareLinks = new Map<string, string>();
+	private commitSeq = 0;
+
+	private remember(abs: string, data: Uint8Array, op: string) {
+		const list = this.history.get(abs) ?? [];
+		list.unshift({ commit: "c" + ++this.commitSeq, time: Date.now(), data, op: list.length ? op : "create" });
+		this.history.set(abs, list);
+	}
 
 	private touch() {
 		this.version++;
@@ -33,6 +49,15 @@ export class MockSeafile {
 	put(abs: string, text: string) {
 		this.mkdirs(abs.slice(0, abs.lastIndexOf("/")) || "/");
 		this.files.set(abs, { data: enc.encode(text), id: "f" + ++this.idSeq, mtime: Math.floor(Date.now() / 1000) });
+		this.remember(abs, enc.encode(text), "edit");
+		this.touch();
+	}
+
+	/** Delete a file as another device would (it goes to the trash). */
+	remove(abs: string) {
+		const old = this.files.get(abs);
+		if (old) this.trashed.push({ path: abs, isDir: false, time: Date.now(), commit: "c" + ++this.commitSeq, data: old.data });
+		this.files.delete(abs);
 		this.touch();
 	}
 
@@ -51,7 +76,59 @@ export class MockSeafile {
 		this.requests.push(`${m} ${u.pathname}`);
 		const p = u.searchParams.get("p");
 		const auth = req.headers?.Authorization;
-		if (u.host === "seaf.test" && u.pathname !== "/api2/auth-token/" && auth !== "Token T") return resp(401, '{"detail":"bad token"}');
+		const isFs = u.pathname.startsWith("/seafhttp/");
+		if (!isFs && u.pathname !== "/api2/auth-token/" && u.pathname !== "/api2/server-info/" && auth !== "Token T") return resp(401, '{"detail":"bad token"}');
+		if (u.pathname === "/api2/server-info/") return resp(200, '{"version":"11.0.13","features":["seafile-basic"]}');
+		if (u.pathname === "/api2/auth/ping/") return resp(200, '"pong"');
+		const v21 = `/api/v2.1/repos/${this.repo}/`;
+		if (u.pathname === v21 + "file/new_history/") {
+			const path = u.searchParams.get("path")!;
+			const list = this.history.get(path) ?? [];
+			const data = list.map((h) => ({ commit_id: h.commit, ctime: new Date(h.time).toISOString(), size: h.data.length, creator_name: this.author, op_type: h.op, path, rev_file_id: h.commit }));
+			return resp(200, JSON.stringify({ data, page: 1, total_count: data.length }));
+		}
+		if (u.pathname === `/api2/repos/${this.repo}/file/revision/`) {
+			return resp(200, JSON.stringify(`${this.fsBase}/seafhttp/rev/${u.searchParams.get("commit_id")}${encodeURIComponent(p!)}`));
+		}
+		if (isFs && u.pathname.startsWith("/seafhttp/rev/")) {
+			const rest = u.pathname.slice("/seafhttp/rev/".length);
+			const i = rest.indexOf("%2F") >= 0 ? rest.indexOf("%2F") : rest.indexOf("/");
+			const commit = rest.slice(0, i);
+			const abs = decodeURIComponent(rest.slice(i));
+			const h = (this.history.get(abs) ?? []).find((x) => x.commit === commit);
+			return h ? resp(200, h.data.slice().buffer as ArrayBuffer) : resp(404, "nf");
+		}
+		if (u.pathname === v21 + "trash/") {
+			const data = [...this.trashed].reverse().map((x) => {
+				const i = x.path.lastIndexOf("/");
+				return { parent_dir: x.path.slice(0, i + 1), obj_name: x.path.slice(i + 1), is_dir: x.isDir, size: x.data?.length ?? "", deleted_time: new Date(x.time).toISOString(), commit_id: x.commit, obj_id: "", scan_stat: null };
+			});
+			return resp(200, JSON.stringify({ data, more: false, scan_stat: null }));
+		}
+		if ((u.pathname === v21 + "file/" || u.pathname === v21 + "dir/") && m === "POST") {
+			const f = new URLSearchParams(req.body as string);
+			const t = this.trashed.find((x) => x.path === p && x.commit === f.get("commit_id"));
+			if (f.get("operation") !== "revert" || !t) return resp(400, '{"error_msg":"bad revert"}');
+			for (const [fp, data] of t.files ?? [[t.path, t.data!] as [string, Uint8Array]]) {
+				this.mkdirs(fp.slice(0, fp.lastIndexOf("/")) || "/");
+				this.files.set(fp, { data, id: "f" + ++this.idSeq, mtime: Math.floor(Date.now() / 1000) });
+				this.remember(fp, data, "recover");
+			}
+			if (t.isDir) this.mkdirs(t.path);
+			this.trashed.splice(this.trashed.indexOf(t), 1);
+			this.touch();
+			return resp(200, '{"success":true}');
+		}
+		if (u.pathname === "/api/v2.1/share-links/") {
+			if (m === "GET") {
+				const l = this.shareLinks.get(u.searchParams.get("path")!);
+				return resp(200, JSON.stringify(l ? [{ link: l, is_expired: false }] : []));
+			}
+			const j = JSON.parse(req.body as string) as { path: string };
+			const link = `https://cloud.example.com/f/${(this.shareLinks.size + 1).toString(16).padStart(8, "0")}a1b2c3d4/`;
+			this.shareLinks.set(j.path, link);
+			return resp(200, JSON.stringify({ link, path: j.path }));
+		}
 
 		if (u.pathname === "/api2/auth-token/") {
 			const f = new URLSearchParams(req.body as string);
@@ -90,6 +167,8 @@ export class MockSeafile {
 			}
 			if (m === "DELETE") {
 				const pre = p + "/";
+				const saved: [string, Uint8Array][] = [...this.files].filter(([k]) => k.startsWith(pre)).map(([k, f]) => [k, f.data]);
+				this.trashed.push({ path: p!, isDir: true, time: Date.now(), commit: "c" + ++this.commitSeq, files: saved });
 				for (const k of [...this.files.keys()]) if (k.startsWith(pre)) this.files.delete(k);
 				for (const k of [...this.dirs]) if (k === p || k.startsWith(pre)) this.dirs.delete(k);
 				this.touch();
@@ -99,9 +178,11 @@ export class MockSeafile {
 		if (u.pathname === `/api2/repos/${this.repo}/file/`) {
 			if (m === "GET") {
 				if (!this.files.has(p!)) return resp(404, '{"error_msg":"File not found"}');
-				return resp(200, JSON.stringify(`http://fs.test/seafhttp/files/x${encodeURIComponent(p!)}`));
+				return resp(200, JSON.stringify(`${this.fsBase}/seafhttp/files/x${encodeURIComponent(p!)}`));
 			}
 			if (m === "DELETE") {
+				const old = this.files.get(p!);
+				if (old) this.trashed.push({ path: p!, isDir: false, time: Date.now(), commit: "c" + ++this.commitSeq, data: old.data });
 				this.files.delete(p!);
 				this.touch();
 				return resp(200, '"success"');
@@ -111,15 +192,15 @@ export class MockSeafile {
 			const f = this.files.get(p!);
 			return f ? resp(200, JSON.stringify({ id: f.id, size: f.data.length, mtime: f.mtime })) : resp(404, '{"error_msg":"File not found"}');
 		}
-		if (u.pathname === `/api2/repos/${this.repo}/upload-link/`) return resp(200, JSON.stringify("http://fs.test/seafhttp/upload-api/tok"));
+		if (u.pathname === `/api2/repos/${this.repo}/upload-link/`) return resp(200, JSON.stringify(`${this.fsBase}/seafhttp/upload-api/tok`));
 
-		if (u.host === "fs.test" && u.pathname.startsWith("/seafhttp/files/x")) {
+		if (isFs && u.pathname.startsWith("/seafhttp/files/x")) {
 			const abs = decodeURIComponent(u.pathname.slice("/seafhttp/files/x".length));
 			const f = this.files.get(abs);
 			if (!f) return resp(404, "nf");
 			return resp(200, f.data.slice().buffer as ArrayBuffer);
 		}
-		if (u.host === "fs.test" && u.pathname === "/seafhttp/upload-api/tok" && m === "POST") {
+		if (isFs && u.pathname === "/seafhttp/upload-api/tok" && m === "POST") {
 			if (u.searchParams.get("ret-json") !== "1") return resp(400, "need ret-json");
 			const fields = parseMultipart(req.contentType!, new Uint8Array(req.body as ArrayBuffer));
 			if (fields.replace?.text !== "1") return resp(400, "need replace");
@@ -132,6 +213,7 @@ export class MockSeafile {
 			const abs = (dir === "/" ? "" : dir) + "/" + name;
 			this.mkdirs(dir);
 			this.files.set(abs, { data: fields.file.data, id: "f" + ++this.idSeq, mtime: Math.floor(Date.now() / 1000) });
+			this.remember(abs, fields.file.data, "edit");
 			this.touch();
 			return resp(200, JSON.stringify([{ name, id: this.files.get(abs)!.id, size: fields.file.data.length }]));
 		}

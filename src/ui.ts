@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting, SuggestModal, TFile } from "obsidian";
+import { App, Modal, moment, Notice, Setting, SuggestModal, TFile } from "obsidian";
 import { t } from "./i18n";
 import type SeafileSyncPlugin from "./main";
 import { diffHunks } from "./merge";
@@ -6,7 +6,7 @@ import { FileVersion, TrashItem } from "./seafile";
 import { looksLikeText, parseConflictName, toText } from "./util";
 
 function when(ms: number): string {
-	return ms ? new Date(ms).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "?";
+	return ms ? moment(ms).format("LLL") : "?"; // follows Obsidian's language
 }
 
 function size(n: number): string {

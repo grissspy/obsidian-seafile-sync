@@ -28,7 +28,11 @@
 .seafile-sync-extra-list .setting-item { padding: 4px 0; }
 
 /* file explorer badges */
-body.seafile-sync-badges .nav-file-title.seafile-sync-pending .nav-file-title-content::after {
-	content: "●"; color: var(--color-orange); font-size: 0.7em; margin-left: 6px; vertical-align: middle;
+/* shown before the name, so long names can't hide them */
+body.seafile-sync-badges .nav-file-title.seafile-sync-pending .nav-file-title-content::before {
+	content: "●"; color: var(--color-orange); font-size: 0.7em; margin-right: 6px; vertical-align: middle;
 }
-body.seafile-sync-badges .nav-file-title[data-path*=" (conflict "] .nav-file-title-content::after { content: " ⚠️"; font-size: 0.85em; }
+body.seafile-sync-badges .nav-file-title[data-path*=" (conflict "] .nav-file-title-content::before { content: "⚠️"; font-size: 0.85em; margin-right: 5px; }
+.seafile-sync-extra-add { flex-wrap: wrap; gap: 8px; }
+.seafile-sync-extra-add .setting-item-control { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; gap: 8px; }
+.seafile-sync-extra-add .setting-item-control input[type="text"] { width: 12em; }
