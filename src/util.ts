@@ -15,7 +15,7 @@ export function toText(data: ArrayBuffer): string {
 
 export function fromText(s: string): ArrayBuffer {
 	const u = enc.encode(s);
-	return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength) as ArrayBuffer;
+	return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength);
 }
 
 /** Heuristic: valid UTF-8 without NUL bytes. */

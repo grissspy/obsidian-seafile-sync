@@ -24,6 +24,35 @@ export class SeafileError extends Error {
 	}
 }
 
+/** Parse JSON from the server into a declared shape (callers validate fields they rely on). */
+function parse<T>(text: string): T {
+	return JSON.parse(text) as T;
+}
+
+interface ApiError {
+	error_msg?: string;
+	detail?: string;
+	non_field_errors?: string[];
+}
+
+interface RepoJson {
+	id: string;
+	name: string;
+	encrypted?: boolean | number;
+	permission: string;
+	root?: string;
+	head_commit_id?: string;
+}
+
+export interface DirEntry {
+	type: "file" | "dir";
+	name: string;
+	id: string;
+	size?: number;
+	mtime?: number;
+	parent_dir?: string;
+}
+
 export interface Library {
 	id: string;
 	name: string;
@@ -58,7 +87,7 @@ export class SeafileApi {
 		if (res.status !== 200) {
 			let msg = res.text;
 			try {
-				const j = JSON.parse(res.text);
+				const j = parse<ApiError>(res.text);
 				msg = (j.non_field_errors && j.non_field_errors.join(" ")) || j.detail || res.text;
 			} catch {
 				/* keep raw */
@@ -66,7 +95,7 @@ export class SeafileApi {
 			if (res.headers["x-seafile-otp"] === "required") msg = "Two-factor code required";
 			throw new SeafileError(`Login failed (${res.status}): ${msg}`, res.status);
 		}
-		return JSON.parse(res.text).token;
+		return parse<{ token: string }>(res.text).token;
 	}
 
 	private async call(path: string, init: Omit<HttpRequest, "url"> = {}, okStatuses = [200, 201]): Promise<HttpResponse> {
@@ -78,7 +107,7 @@ export class SeafileApi {
 		if (!okStatuses.includes(res.status)) {
 			let detail = res.text?.slice(0, 300) ?? "";
 			try {
-				const j = JSON.parse(res.text);
+				const j = parse<ApiError>(res.text);
 				detail = j.error_msg || j.detail || detail;
 			} catch {
 				/* not json */
@@ -101,18 +130,25 @@ export class SeafileApi {
 		}
 	}
 
+	/** Seafile server version, e.g. "11.0.13" (no auth needed). */
+	async serverVersion(): Promise<string> {
+		const res = await this.http({ url: this.server + "/api2/server-info/", method: "GET" });
+		if (res.status !== 200) throw new SeafileError(`server-info → ${res.status}`, res.status);
+		return String(parse<{ version?: string }>(res.text).version ?? "?");
+	}
+
 	async ping(): Promise<void> {
 		await this.call("/api2/auth/ping/");
 	}
 
 	async listLibraries(): Promise<Library[]> {
 		const res = await this.call("/api2/repos/");
-		return (JSON.parse(res.text) as any[]).map((r) => ({ id: r.id, name: r.name, encrypted: !!r.encrypted, permission: r.permission }));
+		return parse<RepoJson[]>(res.text).map((r) => ({ id: r.id, name: r.name, encrypted: !!r.encrypted, permission: r.permission }));
 	}
 
 	async repoInfo(repo: string): Promise<{ root: string | null; encrypted: boolean; name: string; permission: string }> {
 		const res = await this.call(`/api2/repos/${repo}/`);
-		const j = JSON.parse(res.text);
+		const j = parse<RepoJson>(res.text);
 		return { root: j.root || j.head_commit_id || null, encrypted: !!j.encrypted, name: j.name, permission: j.permission };
 	}
 
@@ -125,10 +161,10 @@ export class SeafileApi {
 	}
 
 	/** Raw entries of one folder (non-recursive). */
-	async listDir(repo: string, absPath: string, recursive = false): Promise<any[]> {
+	async listDir(repo: string, absPath: string, recursive = false): Promise<DirEntry[]> {
 		const q = `p=${encodeURIComponent(absPath)}${recursive ? "&recursive=1" : ""}`;
 		const res = await this.call(`/api2/repos/${repo}/dir/?${q}`, {}, [200]);
-		return JSON.parse(res.text);
+		return parse<DirEntry[]>(res.text);
 	}
 
 	async dirExists(repo: string, absPath: string): Promise<boolean> {
@@ -153,12 +189,12 @@ export class SeafileApi {
 	async fileId(repo: string, absPath: string): Promise<string | null> {
 		const res = await this.call(`/api2/repos/${repo}/file/detail/?p=${encodeURIComponent(absPath)}`, {}, [200, 404]);
 		if (res.status === 404) return null;
-		return JSON.parse(res.text).id ?? null;
+		return parse<{ id?: string }>(res.text).id ?? null;
 	}
 
 	async downloadLink(repo: string, absPath: string): Promise<string> {
 		const res = await this.call(`/api2/repos/${repo}/file/?p=${encodeURIComponent(absPath)}&reuse=1`);
-		return this.fixUrl(JSON.parse(res.text));
+		return this.fixUrl(parse<string>(res.text));
 	}
 
 	async fetchUrl(url: string): Promise<ArrayBuffer> {
@@ -169,7 +205,7 @@ export class SeafileApi {
 
 	async uploadLink(repo: string, absDir: string): Promise<string> {
 		const res = await this.call(`/api2/repos/${repo}/upload-link/?p=${encodeURIComponent(absDir)}`);
-		return this.fixUrl(JSON.parse(res.text));
+		return this.fixUrl(parse<string>(res.text));
 	}
 
 	/** Multipart upload (replace=1). Returns the uploaded file's object id. */
@@ -202,7 +238,7 @@ export class SeafileApi {
 			headers: { Authorization: `Token ${this.token}` },
 		});
 		if (res.status !== 200) throw new SeafileError(`Upload failed → ${res.status} ${res.text?.slice(0, 200)}`, res.status);
-		const j = JSON.parse(res.text);
+		const j = parse<{ id: string; name: string } | { id: string; name: string }[]>(res.text);
 		const item = Array.isArray(j) ? j[0] : j;
 		return { id: item.id, name: item.name };
 	}
@@ -256,14 +292,20 @@ export class SeafileRemote implements RemoteFS {
 	async list(): Promise<{ files: RemoteEntry[]; dirs: string[] }> {
 		const files: RemoteEntry[] = [];
 		const dirs: string[] = [];
-		const add = (e: any, parentAbs: string) => {
+		const add = (e: DirEntry, parentAbs: string) => {
+			// Never trust names from the server blindly: a hostile or broken server must not
+			// make us write outside the vault ("..", absolute paths, path separators).
+			const name = String(e.name ?? "");
+			if (typeof e.id !== "string") return;
+			if (!name || name === "." || name === ".." || /[\\/\u0000]/.test(name)) return;
 			const parentRel = this.rel(parentAbs);
+			if (parentRel.split("/").some((seg) => seg === ".." || seg === ".")) return;
 			const p = parentRel ? parentRel + "/" + e.name : e.name;
 			if (e.type === "dir") dirs.push(p);
 			else files.push({ path: p, size: e.size ?? 0, mtime: (e.mtime ?? 0) * 1000, id: e.id });
 		};
 
-		let entries: any[] | null = null;
+		let entries: DirEntry[] | null = null;
 		try {
 			entries = await this.api.listDir(this.repo, this.base, true);
 		} catch (e) {
@@ -275,7 +317,7 @@ export class SeafileRemote implements RemoteFS {
 			entries = null; // fall back to walking
 		}
 		if (entries && entries.every((e) => typeof e.parent_dir === "string")) {
-			for (const e of entries) add(e, e.parent_dir);
+			for (const e of entries) add(e, e.parent_dir ?? this.base);
 			return { files, dirs };
 		}
 		// Fallback for servers without recursive listing: breadth-first walk.

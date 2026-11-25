@@ -1,9 +1,9 @@
 {
   "id": "seafile-vault-sync",
   "name": "Seafile Vault Sync",
-  "version": "1.1.1",
-  "minAppVersion": "1.6.6",
-  "description": "Two-way sync of your vault with a Seafile library on desktop and mobile, with three-way merge for notes, conflict copies and deletion safety.",
+  "version": "1.2.0",
+  "minAppVersion": "1.13.0",
+  "description": "Two-way sync of your vault with a Seafile server on desktop and mobile. Merges notes edited on several devices, keeps conflict copies, guards against mass deletion.",
   "author": "grissspy",
   "authorUrl": "https://github.com/grissspy",
   "isDesktopOnly": false,

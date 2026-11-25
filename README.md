@@ -32,6 +32,22 @@ Other details:
 
 A sync runs on startup, every N minutes, N seconds after your last edit, and when the app returns to the foreground (on mobile). You can also run one manually from the ribbon icon, the status bar, or the **Sync now** command.
 
+## Compatibility
+
+- **Seafile Server 7.0 or newer** (Community or Pro). Tested on **Seafile 11.0.13 CE**. The plugin checks the server version on first sync and warns if it is older than 7.0.
+- **Obsidian 1.13.0 or newer** on Windows, macOS, Linux, Android and iOS. Tested on Obsidian 1.15 (macOS and Android 17).
+- Plain and encrypted libraries, two-factor auth, a library or any folder inside it.
+
+## Security and privacy
+
+- Network: the plugin talks **only** to the Seafile server you enter. No telemetry and no third-party services.
+- Credentials: your password is used once to get an API token and is never stored. The token and the library password are kept in **Obsidian's keychain** (SecretStorage) on each device, not in `data.json`, so they never end up in vault backups or in a synced settings folder.
+- Use `https://`. The settings warn you if the server URL is plain `http://`.
+- File access: to compare your vault with the server, the plugin lists and reads every file in the vault (and the settings folder, if you enable it). The file contents go only to your server.
+- Paths from the server are validated, so a broken or hostile server cannot make the plugin write outside the vault.
+- Deleted files go to the trash (Obsidian's or the system one), and files deleted on the server can be restored from the Seafile library trash. Overwritten versions stay in Seafile's file history.
+- Syncing *Community plugins* through the settings folder means plugin code from the library runs on your devices. Enable it only if you trust everyone who can write to that library.
+
 ## Install
 
 - **Community plugins** (once listed): Settings → Community plugins → Browse → "Seafile Vault Sync".

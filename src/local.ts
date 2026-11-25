@@ -166,7 +166,11 @@ export class ObsidianLocal implements LocalFS {
 		const l = await this.adapter.list(path);
 		if (l.files.length || l.folders.length) return false;
 		this.onSelfWrite(path);
-		await this.adapter.rmdir(path, false);
+		// Checked empty above. adapter.rmdir(path, false) fails with EISDIR on desktop,
+		// so trash the (empty) folder like Obsidian itself would.
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFolder) await this.app.fileManager.trashFile(f);
+		else await this.adapter.rmdir(path, true);
 		return true;
 	}
 }

@@ -243,6 +243,7 @@ export class SyncEngine {
 				await this.syncDirs(Ld, Rd, allRemotePaths, res);
 			} catch (e) {
 				res.errors.push(`folders: ${(e as Error).message}`);
+				opt.log(`ERROR folders: ${(e as Error).message}`);
 			}
 		} else state.dirs = [];
 
