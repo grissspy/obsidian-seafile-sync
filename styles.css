@@ -4,3 +4,4 @@
 .seafile-sync-icon svg { width: 14px; height: 14px; }
 .seafile-sync-log { max-height: 60vh; overflow: auto; font-size: 12px; white-space: pre-wrap; user-select: text; }
 .seafile-sync-ignore { width: 100%; font-family: var(--font-monospace); }
+.seafile-sync-sub { padding-left: 1.5em; }

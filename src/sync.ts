@@ -7,10 +7,10 @@ export function emptyState(target: string): SyncState {
 }
 
 type Action =
-	| { k: "upload"; path: string; why: string }
+	| { k: "upload"; path: string; expectRemote: string | null; why: string }
 	| { k: "download"; path: string; r: RemoteEntry; expectLocal: string | null; why: string }
 	| { k: "delLocal"; path: string; expectLocal: string }
-	| { k: "delRemote"; path: string }
+	| { k: "delRemote"; path: string; expectRemote: string }
 	| { k: "conflict"; path: string; r: RemoteEntry; expectLocal: string; prev: FileState | undefined }
 	| { k: "forget"; path: string };
 
@@ -20,6 +20,8 @@ export class SyncEngine {
 	private hashCache = new Map<string, string>();
 	private remoteModified = false;
 	private deletedRemote = new Set<string>();
+	/** Something was postponed: don't trust the change token next time. */
+	private retryNeeded = false;
 
 	constructor(private local: LocalFS, private remote: RemoteFS, private bases: BaseStore, private state: SyncState, private opt: SyncOptions) {}
 
@@ -46,40 +48,59 @@ export class SyncEngine {
 		await this.rememberBase(path, hash, data);
 	}
 
-	/** Write to the local file only if it still has the content we planned against. */
+	/** Write to the local file only if it still has the content we planned against
+	 *  (null = file must not exist). The check-and-write is atomic in LocalFS.replace. */
 	private async safeLocalWrite(path: string, data: ArrayBuffer, expectLocal: string | null): Promise<boolean> {
-		const st = await this.local.stat(path);
-		if (st) {
-			if (expectLocal === null) return false; // appeared during sync
-			this.hashCache.delete(path);
-			if ((await this.localHash(path)) !== expectLocal) return false;
-		} else if (expectLocal !== null) {
-			// deleted during sync; recreating it would resurrect it, skip
-			return false;
-		}
-		await this.local.write(path, data);
+		const ok = await this.local.replace(path, data, expectLocal);
 		this.hashCache.delete(path);
-		return true;
+		return ok;
+	}
+
+	/** True if the server still has the version we planned against (null = absent). */
+	private async remoteIs(path: string, expectId: string | null): Promise<boolean> {
+		const cur = await this.remote.stat(path);
+		if (cur === expectId) return true;
+		this.retryNeeded = true;
+		return false;
 	}
 
 	async run(): Promise<SyncResult> {
 		const res: SyncResult = { uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0, merged: 0, conflicts: 0, errors: [], skipped: false };
 		const { opt, state } = this;
-		const ign = (p: string) => opt.isIgnored(p);
+		const ign = (p: string, isDir = false) => opt.isIgnored(p, isDir);
+
+		// ---- 0. Forget paths that are excluded now (e.g. a file type was switched off),
+		// so switching them back on later compares contents instead of treating a
+		// missing file as "deleted" and propagating that deletion.
+		let forgot = false;
+		for (const p of Object.keys(state.files)) {
+			if (ign(p)) {
+				delete state.files[p];
+				forgot = true;
+			}
+		}
+		const keptDirs = state.dirs.filter((d) => !ign(d, true));
+		if (keptDirs.length !== state.dirs.length) {
+			state.dirs = keptDirs;
+			forgot = true;
+		}
 
 		// ---- 1. Local scan
 		const tokenBefore = await this.remote.changeToken();
 		const loc = await this.local.list();
 		const L = new Map<string, LocalEntry>();
+		// Paths we must leave alone this run (too large, name clash). Never treated as deleted.
+		const skip = new Set<string>();
 		for (const f of loc.files) {
 			if (ign(f.path)) continue;
 			if (opt.maxFileSize > 0 && f.size > opt.maxFileSize) {
 				opt.log(`skip (too large): ${f.path}`);
+				skip.add(f.path);
 				continue;
 			}
 			L.set(f.path, f);
 		}
-		const Ld = new Set(opt.syncEmptyDirs ? loc.dirs.filter((d) => !ign(d)) : []);
+		const Ld = new Set(opt.syncEmptyDirs ? loc.dirs.filter((d) => !ign(d, true)) : []);
 
 		// Which local files changed since last sync?
 		const localChanged = new Set<string>();
@@ -101,10 +122,12 @@ export class SyncEngine {
 		}
 		const anyLocalChange =
 			localChanged.size > 0 ||
-			Object.keys(state.files).some((p) => !L.has(p) && !ign(p)) ||
+			Object.keys(state.files).some((p) => !L.has(p) && !ign(p) && !skip.has(p)) ||
 			(opt.syncEmptyDirs && (state.dirs.some((d) => !Ld.has(d)) || [...Ld].some((d) => !state.dirs.includes(d))));
 
-		if (!anyLocalChange && tokenBefore && tokenBefore === state.changeToken) {
+		const filtersChanged = (state.filterKey ?? "") !== opt.filterKey;
+		if (!anyLocalChange && !filtersChanged && tokenBefore && tokenBefore === state.changeToken) {
+			if (forgot) await opt.saveState(state);
 			res.skipped = true;
 			return res;
 		}
@@ -118,24 +141,34 @@ export class SyncEngine {
 			if (ign(f.path)) continue;
 			if (opt.maxFileSize > 0 && f.size > opt.maxFileSize) {
 				opt.log(`skip (too large): ${f.path}`);
+				skip.add(f.path);
 				continue;
 			}
 			const low = f.path.toLowerCase();
 			const prev = lowerSeen.get(low);
 			if (prev) {
-				res.errors.push(`"${f.path}" and "${prev}" differ only by letter case; skipped "${f.path}"`);
+				res.errors.push(`"${f.path}" and "${prev}" differ only by letter case; skipped both`);
+				skip.add(f.path);
+				skip.add(prev);
 				continue;
 			}
 			lowerSeen.set(low, f.path);
 			R.set(f.path, f);
 		}
-		const Rd = new Set(opt.syncEmptyDirs ? rem.dirs.filter((d) => !ign(d)) : []);
+		for (const p of skip) R.delete(p);
+		const Rd = new Set(opt.syncEmptyDirs ? rem.dirs.filter((d) => !ign(d, true)) : []);
 
 		// ---- 3. Plan
 		const actions: Action[] = [];
 		const paths = new Set<string>([...L.keys(), ...R.keys(), ...Object.keys(state.files)]);
 		for (const p of paths) {
-			if (ign(p)) continue;
+			if (ign(p)) {
+				// Excluded now (e.g. a file type was switched off): forget it, so turning it
+				// back on later compares contents instead of treating it as deleted.
+				delete state.files[p];
+				continue;
+			}
+			if (skip.has(p)) continue;
 			const l = L.get(p);
 			const r = R.get(p);
 			const s = state.files[p];
@@ -144,7 +177,7 @@ export class SyncEngine {
 					const lc = localChanged.has(p);
 					const rc = r.id !== s.rid;
 					if (!lc && !rc) continue;
-					if (lc && !rc) actions.push({ k: "upload", path: p, why: "changed locally" });
+					if (lc && !rc) actions.push({ k: "upload", path: p, expectRemote: r.id, why: "changed locally" });
 					else if (!lc && rc) actions.push({ k: "download", path: p, r, expectLocal: s.lh, why: "changed remotely" });
 					else actions.push({ k: "conflict", path: p, r, expectLocal: await this.localHash(p), prev: s });
 				} else {
@@ -152,9 +185,9 @@ export class SyncEngine {
 				}
 			} else if (l && !r) {
 				if (s && !localChanged.has(p)) actions.push({ k: "delLocal", path: p, expectLocal: s.lh });
-				else actions.push({ k: "upload", path: p, why: s ? "changed locally, deleted remotely" : "new" });
+				else actions.push({ k: "upload", path: p, expectRemote: null, why: s ? "changed locally, deleted remotely" : "new" });
 			} else if (!l && r) {
-				if (s && r.id === s.rid) actions.push({ k: "delRemote", path: p });
+				if (s && r.id === s.rid) actions.push({ k: "delRemote", path: p, expectRemote: r.id });
 				else actions.push({ k: "download", path: p, r, expectLocal: null, why: s ? "changed remotely, deleted locally" : "new" });
 			} else {
 				actions.push({ k: "forget", path: p });
@@ -170,7 +203,7 @@ export class SyncEngine {
 				opt.log(`deletions declined: restoring ${delL.length + delR.length} files instead`);
 				for (let i = 0; i < actions.length; i++) {
 					const a = actions[i];
-					if (a.k === "delLocal") actions[i] = { k: "upload", path: a.path, why: "restore" };
+					if (a.k === "delLocal") actions[i] = { k: "upload", path: a.path, expectRemote: null, why: "restore" };
 					else if (a.k === "delRemote") actions[i] = { k: "download", path: a.path, r: R.get(a.path)!, expectLocal: null, why: "restore" };
 				}
 			} else if (answer === "skip") {
@@ -215,8 +248,9 @@ export class SyncEngine {
 
 		// ---- 7. Finish
 		// The pre-listing token is only valid if we did not change the library ourselves.
-		state.changeToken = this.remoteModified || res.errors.length ? null : tokenBefore;
+		state.changeToken = this.remoteModified || this.retryNeeded || res.errors.length ? null : tokenBefore;
 		state.lastSync = Date.now();
+		state.filterKey = opt.filterKey;
 		await opt.saveState(state);
 		try {
 			const keep = new Set(Object.values(state.files).map((f) => f.lh));
@@ -233,6 +267,14 @@ export class SyncEngine {
 			case "upload": {
 				const data = await this.local.read(a.path);
 				const h = await sha256(data);
+				// Someone may have uploaded a newer version after we listed the server:
+				// never overwrite it blindly, resolve it as a conflict instead.
+				const cur = await this.remote.stat(a.path);
+				if (cur !== null && cur !== a.expectRemote) {
+					opt.log(`${a.path}: changed on server during sync → resolving as conflict`);
+					const r: RemoteEntry = { path: a.path, id: cur, size: 0, mtime: Date.now() };
+					return this.resolveConflict({ k: "conflict", path: a.path, r, expectLocal: h, prev: state.files[a.path] }, res);
+				}
 				const rid = await this.remote.upload(a.path, data);
 				this.remoteModified = true;
 				await this.record(a.path, data, h, rid);
@@ -243,7 +285,8 @@ export class SyncEngine {
 			case "download": {
 				const data = await this.remote.download(a.path);
 				if (!(await this.safeLocalWrite(a.path, data, a.expectLocal))) {
-					opt.log(`skip ${a.path}: changed locally during sync`);
+					this.retryNeeded = true;
+					opt.log(`skip ${a.path}: changed locally during sync, will merge next time`);
 					return;
 				}
 				await this.record(a.path, data, await sha256(data), a.r.id);
@@ -252,21 +295,22 @@ export class SyncEngine {
 				return;
 			}
 			case "delLocal": {
-				const st = await this.local.stat(a.path);
-				if (st) {
-					this.hashCache.delete(a.path);
-					if ((await this.localHash(a.path)) !== a.expectLocal) {
-						opt.log(`skip delete ${a.path}: changed locally during sync`);
-						return;
-					}
-					await this.local.delete(a.path);
+				if (!(await this.local.deleteIf(a.path, a.expectLocal))) {
+					this.retryNeeded = true;
+					opt.log(`skip delete ${a.path}: changed locally during sync`);
+					return;
 				}
+				this.hashCache.delete(a.path);
 				delete state.files[a.path];
 				res.deletedLocal++;
 				opt.log(`✕ local ${a.path} (deleted on server)`);
 				return;
 			}
 			case "delRemote": {
+				if (!(await this.remoteIs(a.path, a.expectRemote))) {
+					opt.log(`skip delete ${a.path}: changed on server during sync`);
+					return;
+				}
 				await this.remote.deleteFile(a.path);
 				this.remoteModified = true;
 				this.deletedRemote.add(a.path);
@@ -283,25 +327,41 @@ export class SyncEngine {
 		}
 	}
 
+	/** Upload to a.path only if the server still has the version we resolved against. */
+	private async guardedUpload(path: string, data: ArrayBuffer, expectId: string): Promise<string | null> {
+		if (!(await this.remoteIs(path, expectId))) {
+			this.opt.log(`skip ${path}: changed on server during sync, will retry`);
+			return null;
+		}
+		const rid = await this.remote.upload(path, data);
+		this.remoteModified = true;
+		return rid;
+	}
+
 	private async resolveConflict(a: Extract<Action, { k: "conflict" }>, res: SyncResult): Promise<void> {
 		const { opt } = this;
 		const rdata = await this.remote.download(a.path);
 		const rhash = await sha256(rdata);
-		if (rhash === a.expectLocal) {
-			// Same content on both sides — just remember it.
-			const ldata = await this.local.read(a.path);
-			await this.record(a.path, ldata, rhash, a.r.id);
+		const lst = await this.local.stat(a.path);
+		if (!lst) {
+			this.retryNeeded = true;
+			return; // deleted locally meanwhile; next run decides
+		}
+		const ldata = await this.local.read(a.path);
+		const lhash = await sha256(ldata);
+		if (lhash !== a.expectLocal) {
+			this.retryNeeded = true;
+			opt.log(`skip ${a.path}: changed locally during sync`);
 			return;
 		}
-		const lst = await this.local.stat(a.path);
-		const ldata = await this.local.read(a.path);
-		if ((await sha256(ldata)) !== a.expectLocal) {
-			opt.log(`skip ${a.path}: changed locally during sync`);
+		if (rhash === lhash) {
+			// Same content on both sides — just remember it.
+			await this.record(a.path, ldata, lhash, a.r.id);
 			return;
 		}
 
 		let strategy = opt.conflict;
-		if (strategy === "newer") strategy = (lst?.mtime ?? 0) >= a.r.mtime ? "local" : "remote";
+		if (strategy === "newer") strategy = lst.mtime >= a.r.mtime ? "local" : "remote";
 
 		if (strategy === "merge") {
 			if (a.prev && this.canMerge(a.path) && looksLikeText(ldata) && looksLikeText(rdata)) {
@@ -310,13 +370,18 @@ export class SyncEngine {
 					const merged = merge3(base, toText(ldata), toText(rdata));
 					if (merged !== null) {
 						const mdata = fromText(merged);
-						if (!(await this.safeLocalWrite(a.path, mdata, a.expectLocal))) {
+						if (!(await this.remoteIs(a.path, a.r.id))) return;
+						if (!(await this.safeLocalWrite(a.path, mdata, lhash))) {
+							this.retryNeeded = true;
 							opt.log(`skip ${a.path}: changed locally during sync`);
 							return;
 						}
-						const rid = await this.remote.upload(a.path, mdata);
-						this.remoteModified = true;
-						await this.record(a.path, mdata, await sha256(mdata), rid);
+						// Local file now holds the merge. If the upload is skipped, the next run
+						// sees "both changed" again and merges again — nothing is lost.
+						const mhash = await sha256(mdata);
+						const rid = await this.guardedUpload(a.path, mdata, a.r.id);
+						if (rid === null) return;
+						await this.record(a.path, mdata, mhash, rid);
 						res.merged++;
 						opt.log(`⇄ merged ${a.path}`);
 						return;
@@ -327,41 +392,45 @@ export class SyncEngine {
 		}
 
 		if (strategy === "local") {
-			const rid = await this.remote.upload(a.path, ldata);
-			this.remoteModified = true;
-			await this.record(a.path, ldata, a.expectLocal, rid);
+			const rid = await this.guardedUpload(a.path, ldata, a.r.id);
+			if (rid === null) return;
+			await this.record(a.path, ldata, lhash, rid);
 			res.uploaded++;
-			opt.log(`↑ ${a.path} (conflict: kept local)`);
+			opt.log(`↑ ${a.path} (conflict: kept local; old server version is in Seafile file history)`);
 			return;
 		}
 		if (strategy === "remote") {
-			if (!(await this.safeLocalWrite(a.path, rdata, a.expectLocal))) return;
+			if (!(await this.safeLocalWrite(a.path, rdata, lhash))) {
+				this.retryNeeded = true;
+				return;
+			}
 			await this.record(a.path, rdata, rhash, a.r.id);
 			res.downloaded++;
-			opt.log(`↓ ${a.path} (conflict: kept server)`);
+			opt.log(`↓ ${a.path} (conflict: kept server version, local edits discarded)`);
 			return;
 		}
 
 		// keep-both: newer version keeps the name, the other becomes a conflict copy.
-		const localNewer = (lst?.mtime ?? 0) >= a.r.mtime;
+		// The copy is written first, so whatever happens next both versions exist.
+		const localNewer = lst.mtime >= a.r.mtime;
 		const now = new Date();
 		if (localNewer) {
 			const copy = formatConflictName(a.path, "server", now);
-			await this.local.write(copy, rdata);
+			if (!(await this.safeLocalWrite(copy, rdata, null))) throw new Error(`cannot create ${copy}`);
 			const ridCopy = await this.remote.upload(copy, rdata);
-			const rid = await this.remote.upload(a.path, ldata);
 			this.remoteModified = true;
 			await this.record(copy, rdata, rhash, ridCopy);
-			await this.record(a.path, ldata, a.expectLocal, rid);
+			const rid = await this.guardedUpload(a.path, ldata, a.r.id);
+			if (rid !== null) await this.record(a.path, ldata, lhash, rid);
 			opt.log(`⚠ conflict ${a.path}: server version saved as ${copy}`);
 		} else {
 			const copy = formatConflictName(a.path, opt.deviceName, now);
-			await this.local.write(copy, ldata);
+			if (!(await this.safeLocalWrite(copy, ldata, null))) throw new Error(`cannot create ${copy}`);
 			const ridCopy = await this.remote.upload(copy, ldata);
 			this.remoteModified = true;
-			if (!(await this.safeLocalWrite(a.path, rdata, a.expectLocal))) return;
-			await this.record(copy, ldata, a.expectLocal, ridCopy);
-			await this.record(a.path, rdata, rhash, a.r.id);
+			await this.record(copy, ldata, lhash, ridCopy);
+			if (await this.safeLocalWrite(a.path, rdata, lhash)) await this.record(a.path, rdata, rhash, a.r.id);
+			else this.retryNeeded = true;
 			opt.log(`⚠ conflict ${a.path}: local version saved as ${copy}`);
 		}
 		res.conflicts++;
@@ -427,7 +496,7 @@ export class SyncEngine {
 			final.add(d);
 		}
 		// Folders that hold synced files exist on both sides too.
-		for (const p of Object.keys(state.files)) for (const d of parentDirs(p)) if (!opt.isIgnored(d)) final.add(d);
+		for (const p of Object.keys(state.files)) for (const d of parentDirs(p)) if (!opt.isIgnored(d, true)) final.add(d);
 		state.dirs = [...final].sort();
 		void res;
 	}

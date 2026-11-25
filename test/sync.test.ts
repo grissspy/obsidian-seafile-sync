@@ -22,6 +22,7 @@ class Device {
 	logs: string[] = [];
 	deleteAnswer: "delete" | "restore" | "skip" = "delete";
 	asked = 0;
+	maxFileSize = 0;
 	constructor(public name: string, public server: MockSeafile, public conflict: ConflictStrategy = "merge", public folder = "Vault", public ignore: string[] = []) {}
 
 	async sync() {
@@ -29,11 +30,13 @@ class Device {
 		const remote = new SeafileRemote(api, this.server.repo, this.folder);
 		await remote.prepare();
 		const res = new RegExpList(this.ignore);
+		const self = this;
 		const eng = new SyncEngine(this.local, remote, this.bases, this.state, {
 			conflict: this.conflict,
 			deviceName: this.name,
 			mergeExtensions: ["md", "txt"],
-			maxFileSize: 0,
+			maxFileSize: this.maxFileSize,
+			filterKey: this.ignore.join("\n") + "|" + this.maxFileSize,
 			concurrency: 3,
 			syncEmptyDirs: true,
 			deleteThreshold: 5,
@@ -238,6 +241,107 @@ async function main() {
 	W.local.set("a/b.md", "b");
 	await W.sync();
 	check("whole library sync", R.get("/root.md") === "r" && R.get("/a/b.md") === "b");
+
+	// ================= Races and safety =================
+	{
+		const S2 = new MockSeafile();
+		const P = new Device("P", S2);
+		const Q = new Device("Q", S2);
+		P.local.set("n.md", "1\n2\n3\n4\n5\n");
+		await P.sync();
+		await Q.sync();
+
+		// (a) Another device uploads between our listing and our upload → no blind overwrite.
+		P.local.set("n.md", "ONE\n2\n3\n4\n5\n");
+		let fired = false;
+		S2.onRequest = (m, path, p) => {
+			if (!fired && path.endsWith("/file/detail/") && p === "/Vault/n.md") {
+				fired = true;
+				S2.put("/Vault/n.md", "1\n2\n3\n4\nFIVE\n"); // Q's edit lands right now
+			}
+		};
+		await P.sync();
+		S2.onRequest = null;
+		check("race upload: merged, nothing lost", S2.get("/Vault/n.md") === "ONE\n2\n3\n4\nFIVE\n" && P.local.text("n.md") === "ONE\n2\n3\n4\nFIVE\n", { srv: S2.get("/Vault/n.md"), loc: P.local.text("n.md") });
+		await Q.sync();
+
+		// (b) User types while a download is about to overwrite the file.
+		Q.local.set("n.md", Q.local.text("n.md")!); // no-op
+		P.local.set("n.md", "ONE\n2\nthree\n4\nFIVE\n");
+		await P.sync();
+		Q.local.beforeWrite = (path) => {
+			if (path === "n.md" && Q.local.text("n.md") === "ONE\n2\n3\n4\nFIVE\n") Q.local.set("n.md", "ONE\ntwo\n3\n4\nFIVE\n");
+		};
+		await Q.sync();
+		Q.local.beforeWrite = null;
+		check("race download: typing kept", Q.local.text("n.md") === "ONE\ntwo\n3\n4\nFIVE\n", Q.local.text("n.md"));
+		await Q.sync();
+		check("race download: merged next run", Q.local.text("n.md") === "ONE\ntwo\nthree\n4\nFIVE\n", Q.local.text("n.md"));
+		await P.sync();
+		check("race download: other side converges", P.local.text("n.md") === Q.local.text("n.md"));
+
+		// (c) Remote edit lands right before we delete it on the server → not deleted.
+		P.local.set("d.md", "keep me");
+		await P.sync();
+		await Q.sync();
+		Q.local.files.delete("d.md");
+		S2.onRequest = (m, path, p) => {
+			if (path.endsWith("/file/detail/") && p === "/Vault/d.md") {
+				S2.onRequest = null;
+				S2.put("/Vault/d.md", "edited elsewhere");
+			}
+		};
+		await Q.sync();
+		check("race delete: server edit survives", S2.get("/Vault/d.md") === "edited elsewhere");
+		await Q.sync();
+		check("race delete: edit comes back", Q.local.text("d.md") === "edited elsewhere");
+
+		// (d) Local edit right before a server-side deletion is applied locally → not deleted.
+		await P.sync();
+		P.local.files.delete("d.md");
+		await P.sync();
+		Q.local.beforeWrite = (path) => {
+			if (path === "d.md") Q.local.set("d.md", "typed just now");
+		};
+		await Q.sync();
+		Q.local.beforeWrite = null;
+		check("race local delete: typing kept", Q.local.text("d.md") === "typed just now");
+		await Q.sync();
+		check("race local delete: re-uploaded", S2.get("/Vault/d.md") === "typed just now");
+
+		// (e) File grows beyond the size limit → must not be deleted on the server.
+		P.local.set("big.bin", "small");
+		await P.sync();
+		P.maxFileSize = 10;
+		P.local.set("big.bin", "now it is much bigger than ten bytes");
+		await P.sync();
+		check("oversized not deleted on server", S2.get("/Vault/big.bin") === "small");
+		await Q.sync();
+		Q.maxFileSize = 10;
+		S2.put("/Vault/big.bin", "server side grew too, way past the limit");
+		await Q.sync();
+		check("oversized not deleted locally", Q.local.text("big.bin") === "small");
+
+		// (f) Case clash on the server → neither file deleted locally.
+		S2.put("/Vault/Case.md", "upper");
+		await Q.sync();
+		S2.put("/Vault/case.md", "lower");
+		const r2 = await Q.sync();
+		check("case clash: local kept", Q.local.text("Case.md") === "upper" && r2.deletedLocal === 0, r2);
+		S2.files.delete("/Vault/case.md");
+
+		// (g) Type switched off, file removed locally, switched back on → re-downloaded, not deleted.
+		P.local.set("pic.png", "PNG");
+		await P.sync();
+		await Q.sync();
+		Q.ignore = ["*.png"];
+		await Q.sync();
+		Q.local.files.delete("pic.png");
+		await Q.sync();
+		Q.ignore = [];
+		await Q.sync();
+		check("re-enabled type downloads, server intact", S2.get("/Vault/pic.png") === "PNG" && Q.local.text("pic.png") === "PNG", { srv: S2.get("/Vault/pic.png"), loc: Q.local.text("pic.png"), log: Q.logs.slice(-6) });
+	}
 
 	console.log(`\n${passes} passed, ${failures} failed`);
 	if (failures) process.exit(1);

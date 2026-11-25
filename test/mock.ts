@@ -1,7 +1,7 @@
 // In-memory fakes: a Seafile server speaking the api2 HTTP protocol, and a local vault.
 import { Http, HttpResponse } from "../src/seafile";
 import { BaseStore, LocalEntry, LocalFS } from "../src/types";
-import { dirname } from "../src/util";
+import { dirname, sha256 } from "../src/util";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -41,9 +41,13 @@ export class MockSeafile {
 		return f ? dec.decode(f.data) : undefined;
 	}
 
+	/** Test hook: called for every request before it is handled (simulate another device). */
+	onRequest: ((method: string, path: string, p: string | null) => void) | null = null;
+
 	http: Http = async (req) => {
 		const u = new URL(req.url);
 		const m = req.method || "GET";
+		this.onRequest?.(m, u.pathname, u.searchParams.get("p"));
 		this.requests.push(`${m} ${u.pathname}`);
 		const p = u.searchParams.get("p");
 		const auth = req.headers?.Authorization;
@@ -102,6 +106,10 @@ export class MockSeafile {
 				this.touch();
 				return resp(200, '"success"');
 			}
+		}
+		if (u.pathname === `/api2/repos/${this.repo}/file/detail/`) {
+			const f = this.files.get(p!);
+			return f ? resp(200, JSON.stringify({ id: f.id, size: f.data.length, mtime: f.mtime })) : resp(404, '{"error_msg":"File not found"}');
 		}
 		if (u.pathname === `/api2/repos/${this.repo}/upload-link/`) return resp(200, JSON.stringify("http://fs.test/seafhttp/upload-api/tok"));
 
@@ -187,12 +195,26 @@ export class MemLocal implements LocalFS {
 		if (!f) throw new Error("ENOENT " + path);
 		return f.data.slice().buffer as ArrayBuffer;
 	}
-	async write(path: string, data: ArrayBuffer) {
+	/** Test hook: runs right before replace/deleteIf checks (simulates the user typing). */
+	beforeWrite: ((path: string) => void) | null = null;
+	private async hashOf(path: string) {
+		const f = this.files.get(path);
+		return f ? sha256(f.data.slice().buffer as ArrayBuffer) : null;
+	}
+	async replace(path: string, data: ArrayBuffer, expect: string | null) {
+		this.beforeWrite?.(path);
+		if ((await this.hashOf(path)) !== expect) return false;
 		this.mk(dirname(path));
 		this.files.set(path, { data: new Uint8Array(data.slice(0)), mtime: (this.clock += 1000) });
+		return true;
 	}
-	async delete(path: string) {
+	async deleteIf(path: string, expect: string) {
+		this.beforeWrite?.(path);
+		const h = await this.hashOf(path);
+		if (h === null) return true;
+		if (h !== expect) return false;
 		this.files.delete(path);
+		return true;
 	}
 	async mkdir(path: string) {
 		this.mk(path);

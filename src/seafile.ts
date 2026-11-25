@@ -149,6 +149,13 @@ export class SeafileApi {
 		});
 	}
 
+	/** Object id of a file, or null if missing. */
+	async fileId(repo: string, absPath: string): Promise<string | null> {
+		const res = await this.call(`/api2/repos/${repo}/file/detail/?p=${encodeURIComponent(absPath)}`, {}, [200, 404]);
+		if (res.status === 404) return null;
+		return JSON.parse(res.text).id ?? null;
+	}
+
 	async downloadLink(repo: string, absPath: string): Promise<string> {
 		const res = await this.call(`/api2/repos/${repo}/file/?p=${encodeURIComponent(absPath)}&reuse=1`);
 		return this.fixUrl(JSON.parse(res.text));
@@ -282,6 +289,10 @@ export class SeafileRemote implements RemoteFS {
 			}
 		}
 		return { files, dirs };
+	}
+
+	stat(path: string): Promise<string | null> {
+		return this.api.fileId(this.repo, this.abs(path));
 	}
 
 	async download(path: string): Promise<ArrayBuffer> {

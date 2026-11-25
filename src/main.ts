@@ -1,10 +1,18 @@
-import { App, debounce, Modal, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile } from "obsidian";
+import { App, debounce, Modal, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile, TFolder } from "obsidian";
 import { AdapterBaseStore, ObsidianLocal } from "./local";
 import { Http, SeafileApi, SeafileRemote } from "./seafile";
 import { DEFAULT_SETTINGS, SeafileSettingTab, Settings } from "./settings";
 import { emptyState, SyncEngine } from "./sync";
 import { SyncResult, SyncState } from "./types";
-import { globToRegExp } from "./util";
+import { extOf, globToRegExp } from "./util";
+
+const NOTE_EXT = new Set(["md", "canvas", "base"]);
+const TYPE_EXT: Record<"images" | "audio" | "video" | "pdf", Set<string>> = {
+	images: new Set(["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "heic", "heif", "tif", "tiff", "ico"]),
+	audio: new Set(["mp3", "wav", "m4a", "ogg", "oga", "flac", "aac", "opus", "3gp", "wma"]),
+	video: new Set(["mp4", "mov", "mkv", "avi", "webm", "ogv", "m4v", "wmv"]),
+	pdf: new Set(["pdf"]),
+};
 
 const obsidianHttp: Http = async (req) => {
 	const r = await requestUrl({
@@ -61,15 +69,25 @@ export default class SeafileSyncPlugin extends Plugin {
 		}
 
 		this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.sync("manual") });
+		this.addCommand({
+			id: "toggle-pause",
+			name: "Pause / resume automatic sync",
+			callback: async () => {
+				this.settings.paused = !this.settings.paused;
+				await this.saveSettings();
+				this.setStatus("idle");
+				new Notice(this.settings.paused ? "Seafile: automatic sync paused" : "Seafile: automatic sync resumed");
+			},
+		});
 		this.addCommand({ id: "show-log", name: "Show sync log", callback: () => new LogModal(this.app, this.logLines).open() });
 
-		const onChange = (f: TAbstractFile) => this.onVaultChange(f.path);
+		const onChange = (f: TAbstractFile) => this.onVaultChange(f.path, f instanceof TFolder);
 		this.registerEvent(this.app.vault.on("modify", onChange));
 		this.registerEvent(this.app.vault.on("create", onChange));
 		this.registerEvent(this.app.vault.on("delete", onChange));
 		this.registerEvent(this.app.vault.on("rename", (f, old) => {
-			this.onVaultChange(f.path);
-			this.onVaultChange(old);
+			this.onVaultChange(f.path, f instanceof TFolder);
+			this.onVaultChange(old, f instanceof TFolder);
 		}));
 
 		this.registerDomEvent(document, "visibilitychange", () => {
@@ -125,10 +143,10 @@ export default class SeafileSyncPlugin extends Plugin {
 	private debouncedSync = debounce(() => this.sync("change"), 15_000, true);
 	private debounceMs = 15_000;
 
-	private onVaultChange(path: string) {
+	private onVaultChange(path: string, isDir: boolean) {
 		const t = this.selfWrites.get(path);
 		if (t && Date.now() - t < 10_000) return; // caused by our own sync
-		if (this.isIgnored(path)) return;
+		if (this.isIgnored(path, isDir)) return;
 		const secs = this.settings.syncOnChangeSeconds;
 		if (!secs || !this.isConfigured()) return;
 		if (this.debounceMs !== secs * 1000) {
@@ -142,12 +160,43 @@ export default class SeafileSyncPlugin extends Plugin {
 
 	private ignoreCache: { src: string; res: RegExp[] } | null = null;
 
-	isIgnored(path: string): boolean {
+	/** Settings-folder rules: which parts of .obsidian the user chose to sync. */
+	private configAllowed(rel: string, isDir: boolean): boolean {
+		const s = this.settings;
+		if (!s.syncConfigDir) return false;
+		if (rel === "") return true;
+		const parts = rel.split("/");
+		if (parts[0] === "plugins") {
+			if (parts.length === 1 || (isDir && parts.length === 2)) return s.cfgPlugins || s.cfgPluginSettings;
+			const isCode = parts.length === 3 && ["main.js", "manifest.json", "styles.css"].includes(parts[2]);
+			return isCode ? s.cfgPlugins : s.cfgPluginSettings;
+		}
+		if (parts[0] === "themes" || parts[0] === "snippets" || rel === "appearance.json") return s.cfgAppearance;
+		if (rel === "hotkeys.json") return s.cfgHotkeys;
+		if (rel === "community-plugins.json") return s.cfgPlugins;
+		return s.cfgCore; // app.json, core-plugins.json, graph.json, bookmarks.json, …
+	}
+
+	/** Attachment-type switches (notes themselves are always synced). */
+	private typeAllowed(path: string): boolean {
+		const s = this.settings;
+		const ext = extOf(path);
+		if (NOTE_EXT.has(ext)) return true;
+		if (TYPE_EXT.images.has(ext)) return s.syncImages;
+		if (TYPE_EXT.audio.has(ext)) return s.syncAudio;
+		if (TYPE_EXT.video.has(ext)) return s.syncVideo;
+		if (TYPE_EXT.pdf.has(ext)) return s.syncPdf;
+		return s.syncOther;
+	}
+
+	isIgnored(path: string, isDir = false): boolean {
 		const cfg = this.app.vault.configDir;
 		const own = this.pluginDir;
-		if (path === `${own}/data.json` || path === `${own}/sync-state.json` || path.startsWith(`${own}/base`)) return true;
+		if (path === `${own}/data.json` || path === `${own}/sync-state.json` || path.startsWith(`${own}/sync-state.json`) || path === `${own}/base` || path.startsWith(`${own}/base/`)) return true;
 		if (path === `${cfg}/workspace.json` || path === `${cfg}/workspace-mobile.json`) return true;
-		if (!this.settings.syncConfigDir && (path === cfg || path.startsWith(cfg + "/"))) return true;
+		if (path === cfg || path.startsWith(cfg + "/")) {
+			if (!this.configAllowed(path === cfg ? "" : path.slice(cfg.length + 1), isDir)) return true;
+		} else if (!isDir && !this.typeAllowed(path)) return true;
 		const src = this.settings.ignore;
 		if (!this.ignoreCache || this.ignoreCache.src !== src) {
 			const res: RegExp[] = [];
@@ -216,16 +265,30 @@ export default class SeafileSyncPlugin extends Plugin {
 		const icon = this.statusEl.createSpan({ cls: "seafile-sync-icon" });
 		setIcon(icon, kind === "error" ? "alert-triangle" : kind === "sync" ? "refresh-cw" : "cloud");
 		if (kind === "sync") icon.addClass("seafile-sync-spinning");
-		this.statusEl.createSpan({ text: " " + (text || (kind === "idle" ? "Seafile" : "")) });
+		const paused = this.settings.paused && kind !== "sync" ? " ⏸" : "";
+		this.statusEl.createSpan({ text: " " + (text || (kind === "idle" ? "Seafile" : "")) + paused });
 		this.statusEl.setAttr("aria-label", "Seafile sync — click to sync now");
 	}
 
 	// ---------- the sync
 
+	private onCellular(): boolean {
+		// Network Information API: available in Android WebView, absent elsewhere.
+		const c = (navigator as unknown as { connection?: { type?: string } }).connection;
+		return Platform.isMobile && c?.type === "cellular";
+	}
+
 	async sync(reason: "manual" | "startup" | "interval" | "change" | "resume"): Promise<void> {
 		if (!this.isConfigured()) {
 			if (reason === "manual") new Notice("Seafile: configure server, sign in and choose a library in settings first.");
 			return;
+		}
+		if (reason !== "manual") {
+			if (this.settings.paused) return;
+			if (this.settings.wifiOnly && this.onCellular()) {
+				this.log(`auto sync (${reason}) skipped: mobile data`);
+				return;
+			}
 		}
 		if (this.syncing) {
 			this.pending = true;
@@ -254,7 +317,11 @@ export default class SeafileSyncPlugin extends Plugin {
 				concurrency: s.concurrency,
 				syncEmptyDirs: s.syncEmptyDirs,
 				deleteThreshold: s.deleteThreshold,
-				isIgnored: (p) => this.isIgnored(p),
+				isIgnored: (p, d) => this.isIgnored(p, d),
+				filterKey: JSON.stringify([
+					s.ignore, s.maxFileSizeMB, s.syncConfigDir, s.cfgCore, s.cfgAppearance, s.cfgHotkeys, s.cfgPlugins,
+					s.cfgPluginSettings, s.syncImages, s.syncAudio, s.syncVideo, s.syncPdf, s.syncOther, s.syncEmptyDirs,
+				]),
 				confirmDeletes: (l, r) => new ConfirmDeleteModal(this.app, l, r).ask(),
 				onProgress: (d, t) => t && this.setStatus("sync", `${d}/${t}`),
 				log: (m) => this.log(m),

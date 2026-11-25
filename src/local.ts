@@ -1,6 +1,6 @@
-import { App, normalizePath, TFile, TFolder } from "obsidian";
+import { App, MarkdownView, normalizePath, TFile, TFolder } from "obsidian";
 import { BaseStore, LocalEntry, LocalFS } from "./types";
-import { dirname } from "./util";
+import { dirname, looksLikeText, sha256 } from "./util";
 
 /** Vault access. Regular notes go through the Vault API (so open editors update);
  *  the config folder (.obsidian) goes through the raw adapter. */
@@ -66,7 +66,66 @@ export class ObsidianLocal implements LocalFS {
 		}
 	}
 
-	async write(path: string, data: ArrayBuffer): Promise<void> {
+	/** Save any open editor of this file so the disk has what the user typed. */
+	private async flushEditors(path: string): Promise<void> {
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const v = leaf.view;
+			if (v instanceof MarkdownView && v.file?.path === path) {
+				try {
+					await v.save();
+				} catch {
+					/* view closing */
+				}
+			}
+		}
+	}
+
+	async replace(path: string, data: ArrayBuffer, expectHash: string | null): Promise<boolean> {
+		this.onSelfWrite(path);
+		await this.flushEditors(path);
+		const st = await this.adapter.stat(path);
+		if (!st) {
+			if (expectHash !== null) return false; // deleted meanwhile: don't resurrect
+			await this.write(path, data);
+			return true;
+		}
+		if (expectHash === null || st.type !== "file") return false; // appeared meanwhile
+		const cur = await this.adapter.readBinary(path);
+		if ((await sha256(cur)) !== expectHash) return false;
+
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFile && !this.isConfig(path) && looksLikeText(cur) && looksLikeText(data)) {
+			// vault.process is a synchronous read-compare-write: no keystroke can slip in between.
+			const strip = (t: string) => t.replace(/^\uFEFF/, "");
+			const dec = new TextDecoder("utf-8", { ignoreBOM: true }); // keep BOM bytes exactly
+			const before = strip(dec.decode(cur));
+			const next = dec.decode(data);
+			let ok = false;
+			await this.app.vault.process(f, (now) => {
+				if (strip(now) === before) {
+					ok = true;
+					return next;
+				}
+				return now;
+			});
+			if (ok) return true;
+			// Text differed only by decoding details? Re-check bytes before giving up.
+			if ((await sha256(await this.adapter.readBinary(path))) !== expectHash) return false;
+		}
+		await this.write(path, data);
+		return true;
+	}
+
+	async deleteIf(path: string, expectHash: string): Promise<boolean> {
+		await this.flushEditors(path);
+		const st = await this.adapter.stat(path);
+		if (!st) return true;
+		if ((await sha256(await this.adapter.readBinary(path))) !== expectHash) return false;
+		await this.delete(path);
+		return true;
+	}
+
+	private async write(path: string, data: ArrayBuffer): Promise<void> {
 		this.onSelfWrite(path);
 		await this.ensureFolder(dirname(path));
 		if (this.isConfig(path)) {
@@ -87,7 +146,7 @@ export class ObsidianLocal implements LocalFS {
 		}
 	}
 
-	async delete(path: string): Promise<void> {
+	private async delete(path: string): Promise<void> {
 		this.onSelfWrite(path);
 		const f = this.app.vault.getAbstractFileByPath(path);
 		if (f instanceof TFile) {

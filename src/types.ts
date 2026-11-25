@@ -19,10 +19,15 @@ export interface LocalFS {
 	list(): Promise<{ files: LocalEntry[]; dirs: string[] }>;
 	stat(path: string): Promise<LocalEntry | null>;
 	read(path: string): Promise<ArrayBuffer>;
-	/** Create or overwrite; parent folders are created as needed. */
-	write(path: string, data: ArrayBuffer): Promise<void>;
-	/** Remove a file (to trash where possible). */
-	delete(path: string): Promise<void>;
+	/**
+	 * Atomically: if the file's current content hash equals `expectHash`
+	 * (or, for null, the file does not exist), write `data` and return true;
+	 * otherwise change nothing and return false. Open editors must be flushed first,
+	 * so unsaved typing is never overwritten. Parent folders are created as needed.
+	 */
+	replace(path: string, data: ArrayBuffer, expectHash: string | null): Promise<boolean>;
+	/** Same idea for deletion (to trash where possible). True if gone afterwards. */
+	deleteIf(path: string, expectHash: string): Promise<boolean>;
 	mkdir(path: string): Promise<void>;
 	/** Remove an empty folder; must not remove a non-empty one. */
 	rmdirIfEmpty(path: string): Promise<boolean>;
@@ -32,6 +37,8 @@ export interface RemoteFS {
 	/** Cheap "has anything changed in the library" token, if supported. */
 	changeToken(): Promise<string | null>;
 	list(): Promise<{ files: RemoteEntry[]; dirs: string[] }>;
+	/** Current object id of a file, or null if it does not exist. */
+	stat(path: string): Promise<string | null>;
 	download(path: string): Promise<ArrayBuffer>;
 	/** Upload/overwrite; returns the new object id. Parent folders are created. */
 	upload(path: string, data: ArrayBuffer): Promise<string>;
@@ -62,6 +69,8 @@ export interface SyncState {
 	files: Record<string, FileState>;
 	dirs: string[];
 	lastSync: number;
+	/** Fingerprint of the include/exclude settings used last time. */
+	filterKey?: string;
 }
 
 export type ConflictStrategy = "merge" | "keep-both" | "local" | "remote" | "newer";
@@ -75,7 +84,9 @@ export interface SyncOptions {
 	syncEmptyDirs: boolean;
 	/** Ask before doing more than this many deletions in one run (0 = never ask). */
 	deleteThreshold: number;
-	isIgnored(path: string): boolean;
+	isIgnored(path: string, isDir?: boolean): boolean;
+	/** Changes whenever what is included/excluded changes; forces a full comparison. */
+	filterKey: string;
 	confirmDeletes(local: string[], remote: string[]): Promise<"delete" | "restore" | "skip">;
 	onProgress?(done: number, total: number, label: string): void;
 	log(msg: string): void;

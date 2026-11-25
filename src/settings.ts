@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type SeafileSyncPlugin from "./main";
 import { SeafileApi } from "./seafile";
 import { ConflictStrategy } from "./types";
@@ -26,6 +26,18 @@ export interface Settings {
 	concurrency: number;
 	notices: "all" | "errors" | "none";
 	rewriteFileServer: boolean;
+	paused: boolean;
+	wifiOnly: boolean;
+	cfgCore: boolean;
+	cfgAppearance: boolean;
+	cfgHotkeys: boolean;
+	cfgPlugins: boolean;
+	cfgPluginSettings: boolean;
+	syncImages: boolean;
+	syncAudio: boolean;
+	syncVideo: boolean;
+	syncPdf: boolean;
+	syncOther: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -51,6 +63,18 @@ export const DEFAULT_SETTINGS: Settings = {
 	concurrency: 4,
 	notices: "errors",
 	rewriteFileServer: false,
+	paused: false,
+	wifiOnly: false,
+	cfgCore: true,
+	cfgAppearance: true,
+	cfgHotkeys: true,
+	cfgPlugins: true,
+	cfgPluginSettings: true,
+	syncImages: true,
+	syncAudio: true,
+	syncVideo: true,
+	syncPdf: true,
+	syncOther: true,
 };
 
 export class SeafileSettingTab extends PluginSettingTab {
@@ -66,6 +90,7 @@ export class SeafileSettingTab extends PluginSettingTab {
 		const s = this.plugin.settings;
 		const save = () => this.plugin.saveSettings();
 		containerEl.empty();
+		containerEl.createEl("p", { cls: "setting-item-description", text: "All settings here apply to this device only." });
 
 		// ---------- Account
 		new Setting(containerEl).setName("Server").setHeading();
@@ -206,6 +231,15 @@ export class SeafileSettingTab extends PluginSettingTab {
 
 		// ---------- Sync
 		new Setting(containerEl).setName("When to sync").setHeading();
+		new Setting(containerEl)
+			.setName("Automatic sync")
+			.setDesc("Turn off to pause all automatic syncs on this device. Manual “Sync now” still works.")
+			.addToggle((t) =>
+				t.setValue(!s.paused).onChange(async (v) => {
+					s.paused = !v;
+					await save();
+				})
+			);
 		new Setting(containerEl).setName("Sync on startup").addToggle((t) =>
 			t.setValue(s.syncOnStartup).onChange(async (v) => {
 				s.syncOnStartup = v;
@@ -231,6 +265,17 @@ export class SeafileSettingTab extends PluginSettingTab {
 					await save();
 				})
 			);
+		if (Platform.isMobile) {
+			new Setting(containerEl)
+				.setName("Auto-sync only on Wi-Fi")
+				.setDesc("Skip automatic syncs on mobile data (Android; iOS does not report the connection type).")
+				.addToggle((t) =>
+					t.setValue(s.wifiOnly).onChange(async (v) => {
+						s.wifiOnly = v;
+						await save();
+					})
+				);
+		}
 		new Setting(containerEl)
 			.setName("Sync when the app comes back to foreground")
 			.setDesc("Useful on Android/iOS.")
@@ -278,15 +323,57 @@ export class SeafileSettingTab extends PluginSettingTab {
 					await save();
 				})
 			);
+		// ---------- What to sync
+		new Setting(containerEl).setName("What to sync").setHeading();
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Notes (.md, .canvas, .base) are always synced. Switching a type off only stops syncing it on this device: nothing is deleted, here or on the server.",
+		});
+		const typeToggle = (name: string, key: "syncImages" | "syncAudio" | "syncVideo" | "syncPdf" | "syncOther", desc?: string) => {
+			const st = new Setting(containerEl).setName(name).addToggle((t) =>
+				t.setValue(s[key]).onChange(async (v) => {
+					s[key] = v;
+					await save();
+				})
+			);
+			if (desc) st.setDesc(desc);
+		};
+		typeToggle("Images", "syncImages", "png, jpg, gif, svg, webp, heic…");
+		typeToggle("Audio", "syncAudio", "mp3, m4a, wav, ogg, flac…");
+		typeToggle("Video", "syncVideo", "mp4, mov, mkv, webm…");
+		typeToggle("PDF", "syncPdf");
+		typeToggle("Other files", "syncOther", "Everything else: archives, office documents, etc.");
+
+		const cfg = this.app.vault.configDir;
 		new Setting(containerEl)
-			.setName(`Sync settings folder (${this.app.vault.configDir})`)
-			.setDesc("Themes, plugins, hotkeys. This plugin's own login and state are never synced.")
+			.setName(`Settings folder (${cfg})`)
+			.setDesc("Sync Obsidian settings between devices. This plugin's login and sync state are never synced.")
 			.addToggle((t) =>
 				t.setValue(s.syncConfigDir).onChange(async (v) => {
 					s.syncConfigDir = v;
 					await save();
+					this.display();
 				})
 			);
+		if (s.syncConfigDir) {
+			const cfgToggle = (name: string, key: "cfgCore" | "cfgAppearance" | "cfgHotkeys" | "cfgPlugins" | "cfgPluginSettings", desc: string) =>
+				new Setting(containerEl)
+					.setName(name)
+					.setDesc(desc)
+					.setClass("seafile-sync-sub")
+					.addToggle((t) =>
+						t.setValue(s[key]).onChange(async (v) => {
+							s[key] = v;
+							await save();
+						})
+					);
+			cfgToggle("Core settings", "cfgCore", "Editor, files & links, core plugins, bookmarks, graph… (app.json, core-plugins.json and other files)");
+			cfgToggle("Appearance", "cfgAppearance", "Theme, fonts, installed themes and CSS snippets");
+			cfgToggle("Hotkeys", "cfgHotkeys", "hotkeys.json");
+			cfgToggle("Community plugins", "cfgPlugins", "Installed plugins (code) and which of them are enabled");
+			cfgToggle("Community plugin settings", "cfgPluginSettings", "Each plugin's own data.json. Turn off if a plugin keeps device-specific data there");
+		}
+
 		new Setting(containerEl).setName("Sync empty folders").addToggle((t) =>
 			t.setValue(s.syncEmptyDirs).onChange(async (v) => {
 				s.syncEmptyDirs = v;

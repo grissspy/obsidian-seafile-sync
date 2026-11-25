@@ -26,7 +26,9 @@ Other details:
 - Open notes refresh in the editor.
 - Empty folders are synced. A rename syncs as a delete plus a new file.
 - Encrypted libraries and two-factor auth are supported. You can sync a sub-folder of a library instead of the whole library.
-- The config folder (`.obsidian`: themes, plugins, hotkeys) can be synced too. The plugin never syncs its own login token or sync state.
+- Per-device choice of what to sync: images, audio, video, PDF, other files, and parts of the settings folder (core settings, appearance, hotkeys, community plugins, plugin settings). Switching something off never deletes it anywhere. The plugin never syncs its own login token or sync state.
+- Automatic sync can be paused (setting or command), and on Android limited to Wi-Fi.
+- Safe with simultaneous editing: before overwriting anything, the plugin re-checks the server (and your open editor) and turns a late change into a merge instead of overwriting it.
 
 A sync runs on startup, every N minutes, N seconds after your last edit, and when the app returns to the foreground (on mobile). You can also run one manually from the ribbon icon, the status bar, or the **Sync now** command.
 
