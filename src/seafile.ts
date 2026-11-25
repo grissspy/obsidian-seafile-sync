@@ -378,7 +378,7 @@ export class SeafileApi {
 		const dir = absPath.slice(0, i) || "/";
 		if (!(await this.dirExists(repo, dir))) await this.mkdirs(repo, dir);
 		const link = await this.uploadLink(repo, dir);
-		await this.uploadTo(link, dir, "", absPath.slice(i + 1), new TextEncoder().encode(text).buffer as ArrayBuffer);
+		await this.uploadTo(link, dir, "", absPath.slice(i + 1), new TextEncoder().encode(text).buffer);
 	}
 
 	async getText(repo: string, absPath: string): Promise<string> {

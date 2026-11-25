@@ -1,12 +1,13 @@
-import { App, Modal, moment, Notice, Setting, SuggestModal, TFile } from "obsidian";
+import { App, Modal, Notice, Setting, SuggestModal, TFile } from "obsidian";
 import { t } from "./i18n";
+import { fmt } from "./time";
 import type SeafileSyncPlugin from "./main";
 import { diffHunks } from "./merge";
 import { FileVersion, TrashItem } from "./seafile";
 import { looksLikeText, parseConflictName, toText } from "./util";
 
 function when(ms: number): string {
-	return ms ? moment(ms).format("LLL") : "?"; // follows Obsidian's language
+	return ms ? fmt("LLL", ms) : "?"; // follows Obsidian's language
 }
 
 function size(n: number): string {

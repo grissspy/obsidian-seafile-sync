@@ -1,4 +1,5 @@
-import { App, debounce, Menu, Modal, moment, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, debounce, Menu, Modal, Notice, Platform, Plugin, requestUrl, setIcon, TAbstractFile, TFile, TFolder } from "obsidian";
+import { fmt } from "./time";
 import { AdapterBaseStore, ObsidianLocal } from "./local";
 import { t } from "./i18n";
 import { Http, SeafileApi, SeafileError, SeafileRemote } from "./seafile";
@@ -607,10 +608,10 @@ export default class SeafileSyncPlugin extends Plugin {
 					try {
 						const data = JSON.parse(await api.getText(this.settings.repoId, `${dir}/${name}.json`)) as Partial<Settings>;
 						const keep = { ...this.settings };
-						this.settings = Object.assign({}, DEFAULT_SETTINGS, keep, data, {
+						this.settings = { ...DEFAULT_SETTINGS, ...keep, ...data,
 							secretId: keep.secretId, deviceName: keep.deviceName, server: keep.server, username: keep.username,
 							repoId: keep.repoId, repoName: keep.repoName, remoteFolder: keep.remoteFolder, paused: keep.paused,
-						});
+						};
 						await this.saveSettings();
 						this.restartTimers();
 						new Notice(t("profLoaded", { name }));
@@ -652,7 +653,7 @@ export default class SeafileSyncPlugin extends Plugin {
 			(kind === "sync" ? t("statusSyncing") : kind === "paused" ? t("statusPaused") : kind === "error" || kind === "offline" ? t("statusError") : t("statusIdle"));
 		this.statusEl.createSpan({ cls: "seafile-sync-label", text: label });
 		const last = this.lastResult
-			? t("tooltipLast", { time: moment(this.lastResult.at).format("LT"), summary: this.lastSummary }) + "\n"
+			? t("tooltipLast", { time: fmt("LT", this.lastResult.at), summary: this.lastSummary }) + "\n"
 			: "";
 		this.statusEl.setAttr("aria-label", last + t("tooltip"));
 		this.statusEl.setAttr("data-tooltip-position", "top");
@@ -786,7 +787,7 @@ export default class SeafileSyncPlugin extends Plugin {
 			this.lastSummary = changed ? parts.join(" · ") : t("upToDate").replace(/^\S+ Seafile: /, "");
 			this.log(`done in ${secs}s: ${this.lastSummary}${result.conflicts ? `, ${result.conflicts} conflicts` : ""}${result.errors.length ? `, ${result.errors.length} errors` : ""}`);
 
-			const time = moment().format("LT");
+			const time = fmt("LT");
 			const loud = s.notices === "all" || (reason === "manual" && s.notices !== "none");
 			if (result.errors.length) {
 				this.setStatus("error");
