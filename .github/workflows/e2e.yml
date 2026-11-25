@@ -54,9 +54,11 @@ jobs:
               echo "OBSIDIAN=$PWD/Obsidian.app/Contents/MacOS/Obsidian" >> $GITHUB_ENV ;;
             Windows)
               gh release download "v$V" -R obsidianmd/obsidian-releases -p "Obsidian-$V.exe"
-              "./Obsidian-$V.exe" /S
-              sleep 20
-              EXE=$(find "$(cygpath "$LOCALAPPDATA")/Programs" "$(cygpath "$PROGRAMFILES")" -maxdepth 3 -iname Obsidian.exe 2>/dev/null | head -1)
+              # Unpack the NSIS installer instead of running it (a silent install can hang on CI).
+              7z x -y -owin-setup "Obsidian-$V.exe" >/dev/null
+              PKG=$(find win-setup -iname 'app-64.7z' | head -1)
+              7z x -y -owin "$PKG" >/dev/null
+              EXE=$(find "$PWD/win" -maxdepth 2 -iname Obsidian.exe | head -1)
               echo "Found $EXE"
               echo "OBSIDIAN=$(cygpath -w "$EXE")" >> $GITHUB_ENV ;;
           esac
