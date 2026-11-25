@@ -1,4 +1,6 @@
 import { merge3 } from "../src/merge";
+import { isExcalidraw } from "../src/excalidraw";
+import { compressToBase64, decompressFromBase64 } from "lz-string";
 import { SeafileApi, SeafileRemote } from "../src/seafile";
 import { emptyState, SyncEngine } from "../src/sync";
 import { ConflictStrategy, SyncState } from "../src/types";
@@ -346,6 +348,55 @@ async function main() {
 		Q.ignore = [];
 		await Q.sync();
 		check("re-enabled type downloads, server intact", S2.get("/Vault/pic.png") === "PNG" && Q.local.text("pic.png") === "PNG", { srv: S2.get("/Vault/pic.png"), loc: Q.local.text("pic.png"), log: Q.logs.slice(-6) });
+	}
+
+	// ---------------- Excalidraw: element-level merge
+	{
+		type E = { id: string; type: string; version: number; versionNonce: number; isDeleted?: boolean; x?: number; text?: string; originalText?: string };
+		const draw = (els: E[]) => {
+			const texts = els.filter((e) => e.type === "text" && !e.isDeleted).map((e) => `${e.text} ^${e.id}`).join("\n\n");
+			const c = compressToBase64(JSON.stringify({ type: "excalidraw", version: 2, source: "test", elements: els, appState: {}, files: {} }));
+			const chunks = c.match(/.{1,256}/g)!.join("\n\n");
+			return `---\nexcalidraw-plugin: parsed\ntags: [excalidraw]\n---\n==⚠  Switch to EXCALIDRAW VIEW ⚠==\n\n\n# Excalidraw Data\n\n## Text Elements\n${texts}\n\n%%\n## Drawing\n\`\`\`compressed-json\n${chunks}\n\`\`\`\n%%`;
+		};
+		const scene = (md: string | undefined) => {
+			const m = /```compressed-json\n([\s\S]*?)\n```/.exec(md ?? "");
+			return m ? (JSON.parse(decompressFromBase64(m[1].replace(/\n/g, ""))) as { elements: E[] }).elements : [];
+		};
+		const r1: E = { id: "r1", type: "rectangle", version: 2, versionNonce: 10, x: 0 };
+		const t1: E = { id: "t1", type: "text", version: 2, versionNonce: 11, text: "Hello", originalText: "Hello" };
+		const S5 = new MockSeafile();
+		const X = new Device("PC", S5);
+		const Y = new Device("Phone", S5);
+		X.local.set("Plan.excalidraw.md", draw([r1, t1]));
+		await X.sync();
+		await Y.sync();
+		// PC moves the rectangle and adds a text; the phone adds an ellipse and deletes "Hello".
+		X.local.set("Plan.excalidraw.md", draw([{ ...r1, version: 3, versionNonce: 20, x: 50 }, t1, { id: "t2", type: "text", version: 1, versionNonce: 21, text: "From PC", originalText: "From PC" }]));
+		Y.local.set("Plan.excalidraw.md", draw([r1, { ...t1, version: 3, versionNonce: 30, isDeleted: true }, { id: "e3", type: "ellipse", version: 1, versionNonce: 31 }]));
+		await X.sync();
+		const r = await Y.sync();
+		const merged = Y.local.text("Plan.excalidraw.md");
+		const els = scene(merged);
+		const byId = (id: string) => els.find((e) => e.id === id);
+		check("excalidraw: merged, no conflict copy", r.merged === 1 && ![...Y.local.files.keys()].some((k) => k.includes("(conflict ")), r);
+		check("excalidraw: both devices' new elements kept", !!byId("t2") && !!byId("e3"), els.map((e) => e.id));
+		check("excalidraw: newer edit of an element wins", byId("r1")?.x === 50 && byId("r1")?.version === 3);
+		check("excalidraw: deletion carried over", byId("t1")?.isDeleted === true);
+		check("excalidraw: text section matches the drawing", !!merged && merged.includes("From PC ^t2") && !merged.includes("Hello ^t1"), merged?.slice(0, 300));
+		check("excalidraw: same file on server", S5.get("/Vault/Plan.excalidraw.md") === merged);
+		await X.sync();
+		check("excalidraw: other device gets the merge", X.local.text("Plan.excalidraw.md") === merged);
+		// Unreadable drawing → both versions kept.
+		X.local.set("Bad.excalidraw.md", "## Drawing\n```compressed-json\n!!!\n```\nA");
+		await X.sync();
+		await Y.sync();
+		X.local.set("Bad.excalidraw.md", "## Drawing\n```compressed-json\n!!!\n```\nB");
+		Y.local.set("Bad.excalidraw.md", "## Drawing\n```compressed-json\n!!!\n```\nC");
+		await X.sync();
+		await Y.sync();
+		check("excalidraw: unreadable → both versions kept", [...Y.local.files.keys()].some((k) => k.startsWith("Bad") && k.includes("(conflict ")), [...Y.local.files.keys()]);
+		check("isExcalidraw", isExcalidraw("a/b.excalidraw.md") && isExcalidraw("x.excalidraw") && !isExcalidraw("note.md"));
 	}
 
 	// ---------------- conflict names

@@ -118,11 +118,14 @@ async function main() {
 						const r = { top: parseFloat(cs.paddingTop) || 0, bottom: parseFloat(cs.paddingBottom) || 0, dpr: devicePixelRatio, h: innerHeight, w: innerWidth };
 						d.remove(); await sleep(500); return r;`);
 					fs.writeFileSync(tmp, adb("exec-out", "screencap", "-p"));
-					const top = Math.round(Math.max(m.top, 24) * m.dpr) + 8;
-					const height = Math.round((m.h - m.bottom) * m.dpr) - top;
-					const width = Math.round(m.w * m.dpr);
-					execFileSync("sips", ["-c", String(height), String(width), "--cropOffset", String(top), "0", tmp, "--out", path.join(out, name + ".png")], { stdio: "ignore" });
-					execFileSync("sips", ["-Z", "1400", path.join(out, name + ".png")], { stdio: "ignore" });
+					// Scale to 1400 px high, then cut the status bar (top) and the gesture bar (bottom).
+					const file = path.join(out, name + ".png");
+					fs.copyFileSync(tmp, file);
+					execFileSync("sips", ["-Z", "1400", file], { stdio: "ignore" });
+					const w = Math.round((1400 * m.w) / m.h);
+					const top = Math.max(52, Math.round((m.top / m.h) * 1400) + 8);
+					const bottom = Math.max(30, Math.round((m.bottom / m.h) * 1400));
+					execFileSync("sips", ["-c", String(1400 - top - bottom), String(w), "--cropOffset", String(top), "0", file], { stdio: "ignore" });
 					console.log(`  📸 ${name}.png`);
 				},
 				async settings(name) {

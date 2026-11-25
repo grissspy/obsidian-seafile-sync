@@ -1,5 +1,6 @@
 import { merge3 } from "./merge";
 import { BaseStore, FileState, LocalEntry, LocalFS, RemoteEntry, RemoteFS, SyncOptions, SyncResult, SyncState } from "./types";
+import { isExcalidraw, mergeExcalidraw } from "./excalidraw";
 import { extOf, formatConflictName, fromText, looksLikeText, parentDirs, pool, sha256, toText } from "./util";
 
 export function emptyState(target: string): SyncState {
@@ -34,6 +35,9 @@ export class SyncEngine {
 	}
 
 	private canMerge(path: string): boolean {
+		// Excalidraw drawings are markdown wrapping one compressed JSON line: a line merge could
+		// mix two drawings, so concurrent edits keep both versions instead.
+		if (isExcalidraw(path)) return false;
 		return this.opt.mergeExtensions.includes(extOf(path));
 	}
 
@@ -364,6 +368,26 @@ export class SyncEngine {
 
 		let strategy = opt.conflict;
 		if (strategy === "newer") strategy = lst.mtime >= a.r.mtime ? "local" : "remote";
+
+		if (strategy === "merge" && isExcalidraw(a.path) && looksLikeText(ldata) && looksLikeText(rdata)) {
+			// Drawings: merge element by element (no common ancestor needed).
+			const merged = mergeExcalidraw(a.path, toText(ldata), toText(rdata));
+			if (merged !== null) {
+				const mdata = fromText(merged);
+				if (!(await this.remoteIs(a.path, a.r.id))) return;
+				if (!(await this.safeLocalWrite(a.path, mdata, lhash))) {
+					this.retryNeeded = true;
+					return;
+				}
+				const rid = await this.guardedUpload(a.path, mdata, a.r.id);
+				if (rid === null) return;
+				await this.record(a.path, mdata, await sha256(mdata), rid);
+				res.merged++;
+				opt.log(`⇄ merged drawing ${a.path}`);
+				return;
+			}
+			strategy = "keep-both";
+		}
 
 		if (strategy === "merge") {
 			if (a.prev && this.canMerge(a.path) && looksLikeText(ldata) && looksLikeText(rdata)) {

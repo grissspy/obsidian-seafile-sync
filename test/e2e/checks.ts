@@ -4,7 +4,7 @@ import { ID, Run } from "./shots";
 
 export async function checks(run: Run, mock: MockSeafile, check: (name: string, ok: boolean, info?: unknown) => void, version: string) {
 	const text = (abs: string) => mock.get(abs);
-		const info = await run<{ v: string; app: string }>(`return { v: P.manifest.version, app: typeof require === "function" ? require("obsidian").apiVersion : (await window.Capacitor?.Plugins?.App?.getInfo?.())?.version ?? "?" };`);
+		const info = await run<{ v: string; app: string }>(`return { v: P.manifest.version, app: navigator.userAgent.split("obsidian/")[1]?.split(" ")[0] ?? (await window.Capacitor?.Plugins?.App?.getInfo?.())?.version ?? "?" };`);
 		console.log(`Obsidian ${info.app}, plugin ${info.v}`);
 		check("plugin loads", info.v === version, info);
 
@@ -100,9 +100,10 @@ export async function checks(run: Run, mock: MockSeafile, check: (name: string, 
 		for (let i = 0; i < 25; i++) mock.remove(`/Vault/bulk/n${i}.md`);
 		const guard = (labels: string[]) =>
 			run<{ asked: boolean; left: number }>(`
+			for (let i = 0; i < 50 && document.querySelector(".modal"); i++) await sleep(100);
 			const p = P.sync("manual");
 			let asked = false;
-			for (let i = 0; i < 40; i++) { await sleep(150); const b = [...document.querySelectorAll(".modal button")].find((x) => ${JSON.stringify(labels)}.includes(x.textContent)); if (b) { asked = true; b.click(); break; } }
+			for (let i = 0; i < 400; i++) { await sleep(150); const b = [...([...document.querySelectorAll(".modal")].pop()?.querySelectorAll("button") ?? [])].find((x) => ${JSON.stringify(labels)}.includes(x.textContent.trim())); if (b) { asked = true; b.click(); break; } }
 			await p;
 			return { asked, left: L().filter((x) => x.startsWith("bulk/")).length };`);
 		const r9 = await guard(["Not now", "Не сейчас"]);
@@ -143,6 +144,8 @@ export async function checks(run: Run, mock: MockSeafile, check: (name: string, 
 		// --- 12. explorer badge and share link
 		console.log("· 12. explorer badge and share link");
 		const r12 = await run<{ pending: boolean; afterSync: boolean; notice: string }>(`
+			app.workspace.leftSplit?.expand?.(); // phones keep the file list in a closed drawer
+			await sleep(600);
 			await W("Draft.md", "not synced yet");
 			await sleep(1200);
 			const el = () => document.querySelector('.nav-file-title[data-path="Draft.md"]');
@@ -150,6 +153,7 @@ export async function checks(run: Run, mock: MockSeafile, check: (name: string, 
 			await SY();
 			await sleep(800);
 			const afterSync = !!el() && el().classList.contains("seafile-sync-pending");
+			if (app.isMobile) app.workspace.leftSplit?.collapse?.();
 			await P.copyShareLink(app.vault.getFileByPath("Draft.md"));
 			const n = [...document.querySelectorAll(".notice")].map((x) => x.textContent).filter((t) => t.includes("🔗")).pop() || "";
 			return { pending, afterSync, notice: n };`);
