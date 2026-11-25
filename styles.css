@@ -5,3 +5,30 @@
 .seafile-sync-log { max-height: 60vh; overflow: auto; font-size: 12px; white-space: pre-wrap; user-select: text; }
 .seafile-sync-ignore { width: 100%; font-family: var(--font-monospace); }
 .seafile-sync-sub { padding-left: 1.5em; }
+
+/* modals */
+.modal.seafile-sync-wide { width: min(900px, 95vw); }
+.seafile-sync-muted { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.seafile-sync-trash { max-height: 50vh; overflow: auto; }
+
+/* diff and conflict view */
+.seafile-sync-diff-legend { display: flex; gap: 1em; margin-bottom: 0.5em; font-size: var(--font-ui-smaller); }
+.seafile-sync-hunk { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: 6px 8px; margin: 8px 0; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.seafile-sync-hunk .setting-item { font-family: var(--font-interface); border-top: none; padding: 6px 0 0; }
+.seafile-sync-side { margin: 4px 0; }
+.seafile-sync-side-title { font-family: var(--font-interface); font-weight: var(--font-semibold); margin-bottom: 2px; }
+.seafile-sync-del { background: rgba(var(--color-red-rgb), 0.15); }
+.seafile-sync-add { background: rgba(var(--color-green-rgb), 0.15); }
+.seafile-sync-ctx { color: var(--text-muted); }
+.seafile-sync-diff-legend .seafile-sync-del, .seafile-sync-diff-legend .seafile-sync-add { padding: 0 6px; border-radius: var(--radius-s); }
+
+/* settings: extra libraries */
+.seafile-sync-extra .setting-item-control { flex: 1 1 100%; justify-content: flex-start; }
+.seafile-sync-extra-list { width: 100%; }
+.seafile-sync-extra-list .setting-item { padding: 4px 0; }
+
+/* file explorer badges */
+body.seafile-sync-badges .nav-file-title.seafile-sync-pending .nav-file-title-content::after {
+	content: "●"; color: var(--color-orange); font-size: 0.7em; margin-left: 6px; vertical-align: middle;
+}
+body.seafile-sync-badges .nav-file-title[data-path*=" (conflict "] .nav-file-title-content::after { content: " ⚠️"; font-size: 0.85em; }

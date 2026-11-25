@@ -2,7 +2,9 @@ import { merge3 } from "../src/merge";
 import { SeafileApi, SeafileRemote } from "../src/seafile";
 import { emptyState, SyncEngine } from "../src/sync";
 import { ConflictStrategy, SyncState } from "../src/types";
-import { globToRegExp } from "../src/util";
+import { formatConflictName, globToRegExp, parseConflictName } from "../src/util";
+import { PrefixLocal } from "../src/prefix";
+import { LocalFS } from "../src/types";
 import { MemBases, MemLocal, MockSeafile } from "./mock";
 
 let failures = 0;
@@ -23,6 +25,7 @@ class Device {
 	deleteAnswer: "delete" | "restore" | "skip" = "delete";
 	asked = 0;
 	maxFileSize = 0;
+	view: LocalFS | null = null;
 	constructor(public name: string, public server: MockSeafile, public conflict: ConflictStrategy = "merge", public folder = "Vault", public ignore: string[] = []) {}
 
 	async sync() {
@@ -31,7 +34,7 @@ class Device {
 		await remote.prepare();
 		const res = new RegExpList(this.ignore);
 		const self = this;
-		const eng = new SyncEngine(this.local, remote, this.bases, this.state, {
+		const eng = new SyncEngine(this.view ?? this.local, remote, this.bases, this.state, {
 			conflict: this.conflict,
 			deviceName: this.name,
 			mergeExtensions: ["md", "txt"],
@@ -341,6 +344,37 @@ async function main() {
 		Q.ignore = [];
 		await Q.sync();
 		check("re-enabled type downloads, server intact", S2.get("/Vault/pic.png") === "PNG" && Q.local.text("pic.png") === "PNG", { srv: S2.get("/Vault/pic.png"), loc: Q.local.text("pic.png"), log: Q.logs.slice(-6) });
+	}
+
+	// ---------------- conflict names
+	{
+		const n = formatConflictName("dir/My note.md", "Pixel 10", new Date(2026, 10, 25, 9, 5, 7));
+		const p = parseConflictName(n);
+		check("conflict name roundtrip", p?.original === "dir/My note.md" && p.device === "Pixel 10", { n, p });
+		const n2 = formatConflictName("README", "server", new Date());
+		check("conflict name no ext", parseConflictName(n2)?.original === "README", n2);
+		check("not a conflict name", parseConflictName("dir/note.md") === null);
+	}
+
+	// ---------------- extra library: a vault folder synced to another place
+	{
+		const S3 = new MockSeafile();
+		const W = new Device("PC", S3, "merge", "Other");
+		W.local.set("main.md", "main vault note");
+		W.local.set("Work/plan.md", "plan");
+		W.local.set("Work/sub/x.md", "x");
+		W.view = new PrefixLocal(W.local, "Work");
+		const r = await W.sync();
+		check("prefix: only folder uploaded", r.uploaded === 2 && S3.get("/Other/plan.md") === "plan" && S3.get("/Other/sub/x.md") === "x" && !S3.get("/Other/main.md"), r);
+		const W2 = new Device("Phone", S3, "merge", "Other");
+		W2.local.set("unrelated.md", "u");
+		W2.view = new PrefixLocal(W2.local, "Team");
+		await W2.sync();
+		check("prefix: downloaded into folder", W2.local.text("Team/plan.md") === "plan" && W2.local.text("Team/sub/x.md") === "x" && W2.local.text("unrelated.md") === "u");
+		W2.local.files.delete("Team/plan.md");
+		await W2.sync();
+		await W.sync();
+		check("prefix: delete propagates, outside untouched", !W.local.text("Work/plan.md") && W.local.text("main.md") === "main vault note");
 	}
 
 	console.log(`\n${passes} passed, ${failures} failed`);

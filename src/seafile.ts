@@ -53,6 +53,53 @@ export interface DirEntry {
 	parent_dir?: string;
 }
 
+interface HistoryJson {
+	commit_id: string;
+	ctime: string;
+	size?: number | string;
+	creator_name?: string;
+	op_type?: string;
+	path?: string;
+	rev_file_id?: string;
+}
+
+interface OldHistoryJson {
+	id: string;
+	ctime: number;
+	rev_file_size?: number;
+	creator_name?: string;
+	name?: string;
+	path?: string;
+	rev_file_id?: string;
+}
+
+interface TrashJson {
+	parent_dir: string;
+	obj_name: string;
+	is_dir?: boolean;
+	size?: number | string;
+	deleted_time: string;
+	commit_id: string;
+}
+
+export interface FileVersion {
+	commitId: string;
+	time: number; // ms
+	size: number;
+	author: string;
+	op: string; // create / edit / rename / …
+	path: string; // absolute path at that version
+	fileId: string;
+}
+
+export interface TrashItem {
+	path: string; // absolute
+	isDir: boolean;
+	size: number;
+	deleted: number; // ms
+	commitId: string;
+}
+
 export interface Library {
 	id: string;
 	name: string;
@@ -243,6 +290,101 @@ export class SeafileApi {
 		return { id: item.id, name: item.name };
 	}
 
+	// ---------- history, trash, share links (Seafile 7+; api/v2.1 accepts the same token)
+
+	/** Versions of a file, newest first. */
+	async fileHistory(repo: string, absPath: string, page = 1, perPage = 50): Promise<{ items: FileVersion[]; more: boolean }> {
+		const q = `path=${encodeURIComponent(absPath)}&page=${page}&per_page=${perPage}`;
+		const res = await this.call(`/api/v2.1/repos/${repo}/file/new_history/?${q}`, {}, [200, 404]);
+		if (res.status === 200) {
+			const j = parse<{ data?: HistoryJson[]; total_count?: number }>(res.text);
+			const items = (j.data ?? []).map((h) => ({
+				commitId: h.commit_id,
+				time: Date.parse(h.ctime) || 0,
+				size: Number(h.size) || 0,
+				author: h.creator_name || "",
+				op: h.op_type || "",
+				path: h.path || absPath,
+				fileId: h.rev_file_id || "",
+			}));
+			return { items, more: (j.total_count ?? 0) > page * perPage };
+		}
+		// Older servers: api2 history (one page).
+		if (page > 1) return { items: [], more: false };
+		const old = await this.call(`/api2/repos/${repo}/file/history/?p=${encodeURIComponent(absPath)}`);
+		const j = parse<{ commits?: OldHistoryJson[] }>(old.text);
+		const items = (j.commits ?? []).map((c) => ({
+			commitId: c.id,
+			time: (Number(c.ctime) || 0) * 1000,
+			size: Number(c.rev_file_size) || 0,
+			author: c.creator_name || c.name || "",
+			op: "",
+			path: c.path || absPath,
+			fileId: c.rev_file_id || "",
+		}));
+		return { items, more: false };
+	}
+
+	/** Content of a file as it was in a given commit. */
+	async downloadRevision(repo: string, absPath: string, commitId: string): Promise<ArrayBuffer> {
+		const q = `p=${encodeURIComponent(absPath)}&commit_id=${encodeURIComponent(commitId)}`;
+		const res = await this.call(`/api2/repos/${repo}/file/revision/?${q}`);
+		return this.fetchUrl(this.fixUrl(parse<string>(res.text)));
+	}
+
+	/** One page of the library trash. Pass the returned cursor to get the next page. */
+	async trash(repo: string, cursor = ""): Promise<{ items: TrashItem[]; cursor: string | null }> {
+		const q = `path=%2F&per_page=100${cursor ? "&scan_stat=" + encodeURIComponent(cursor) : ""}`;
+		const res = await this.call(`/api/v2.1/repos/${repo}/trash/?${q}`);
+		const j = parse<{ data?: TrashJson[]; more?: boolean; scan_stat?: string | null }>(res.text);
+		const items = (j.data ?? []).map((x) => ({
+			path: (x.parent_dir.endsWith("/") ? x.parent_dir : x.parent_dir + "/") + x.obj_name,
+			isDir: !!x.is_dir,
+			size: Number(x.size) || 0,
+			deleted: Date.parse(x.deleted_time) || 0,
+			commitId: x.commit_id,
+		}));
+		return { items, cursor: j.more && j.scan_stat ? j.scan_stat : null };
+	}
+
+	/** Bring back a file or folder from a commit (restores deleted items, or reverts a file). */
+	async revert(repo: string, absPath: string, commitId: string, isDir: boolean): Promise<void> {
+		await this.call(`/api/v2.1/repos/${repo}/${isDir ? "dir" : "file"}/?p=${encodeURIComponent(absPath)}`, {
+			method: "POST",
+			contentType: "application/x-www-form-urlencoded",
+			body: form({ operation: "revert", commit_id: commitId }),
+		});
+	}
+
+	/** Existing share link for a path, or a new one (view-only, no expiry). */
+	async shareLink(repo: string, absPath: string): Promise<string> {
+		const q = `repo_id=${repo}&path=${encodeURIComponent(absPath)}`;
+		const existing = parse<{ link?: string; is_expired?: boolean }[]>((await this.call(`/api/v2.1/share-links/?${q}`)).text);
+		const ok = existing.find((l) => l.link && !l.is_expired);
+		if (ok?.link) return ok.link;
+		const res = await this.call("/api/v2.1/share-links/", {
+			method: "POST",
+			contentType: "application/json",
+			body: JSON.stringify({ repo_id: repo, path: absPath }),
+		});
+		const link = parse<{ link?: string }>(res.text).link;
+		if (!link) throw new SeafileError("Share link: unexpected server reply", res.status);
+		return link;
+	}
+
+	/** Small helper for profile files: upload text to an absolute path. */
+	async putText(repo: string, absPath: string, text: string): Promise<void> {
+		const i = absPath.lastIndexOf("/");
+		const dir = absPath.slice(0, i) || "/";
+		if (!(await this.dirExists(repo, dir))) await this.mkdirs(repo, dir);
+		const link = await this.uploadLink(repo, dir);
+		await this.uploadTo(link, dir, "", absPath.slice(i + 1), new TextEncoder().encode(text).buffer as ArrayBuffer);
+	}
+
+	async getText(repo: string, absPath: string): Promise<string> {
+		return new TextDecoder().decode(await this.fetchUrl(await this.downloadLink(repo, absPath)));
+	}
+
 	async deleteFile(repo: string, absPath: string): Promise<void> {
 		await this.call(`/api2/repos/${repo}/file/?p=${encodeURIComponent(absPath)}`, { method: "DELETE" }, [200, 404]);
 	}
@@ -262,11 +404,11 @@ export class SeafileRemote implements RemoteFS {
 		this.base = b ? "/" + b : "/";
 	}
 
-	private abs(rel: string): string {
+	abs(rel: string): string {
 		return this.base === "/" ? "/" + rel : this.base + "/" + rel;
 	}
 
-	private rel(abs: string): string {
+	rel(abs: string): string {
 		const a = abs.replace(/\/+$/, "");
 		if (this.base === "/") return a.replace(/^\//, "");
 		if (a === this.base) return "";

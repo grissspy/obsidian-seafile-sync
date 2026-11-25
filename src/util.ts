@@ -119,3 +119,10 @@ export function formatConflictName(path: string, device: string, when: Date): st
 	const ext = dot > 0 ? name.slice(dot) : "";
 	return `${dir}${base} (conflict ${safeDevice} ${stamp})${ext}`;
 }
+
+/** Inverse of formatConflictName: the original path and device, or null if not a conflict copy. */
+export function parseConflictName(path: string): { original: string; device: string } | null {
+	const m = /^(.*) \(conflict (.+) \d{4}-\d{2}-\d{2} \d{6}\)(\.[^./]*)?$/.exec(path);
+	if (!m) return null;
+	return { original: m[1] + (m[3] ?? ""), device: m[2] };
+}

@@ -30,7 +30,23 @@ Other details:
 - Automatic sync can be paused (setting or command), and on Android limited to Wi-Fi.
 - Safe with simultaneous editing: before overwriting anything, the plugin re-checks the server (and your open editor) and turns a late change into a merge instead of overwriting it.
 
-A sync runs on startup, every N minutes, N seconds after your last edit, and when the app returns to the foreground (on mobile). You can also run one manually from the ribbon icon, the status bar, or the **Sync now** command.
+A sync runs on startup, every N minutes, when the server reports a change, N seconds after your last edit, and when the app returns to the foreground (on mobile). You can also run one manually from the ribbon icon, the status bar, or the **Sync now** command.
+
+## Tools
+
+- **Version history**: right-click a file → *Seafile: version history*. Compare any server version with the current one and restore it (the current version stays in the history, so this is undoable).
+- **Restore deleted files** from the Seafile trash: pick files in a list and they come back on the next sync.
+- **Conflict helper**: for a note with a `(conflict …)` copy, choose block by block what to keep (main file, copy, or both). The copy then goes to the trash.
+- **Status in the file explorer**: an orange dot marks files not synced yet, ⚠️ marks conflict copies.
+- **Share link**: right-click → *Seafile: copy share link* creates (or reuses) a view-only Seafile link.
+- **Only some folders on a device**: e.g. leave big attachment folders off your phone. Nothing is deleted anywhere.
+- **More libraries**: sync a vault folder with another library or folder, e.g. a shared team library.
+- **Device settings**: every device has its own settings; save them to the server and copy them to a new device in one click.
+- **Progress** of big syncs in the status bar, or in a notice on phones.
+
+### Is it real-time?
+
+Almost. The plugin asks the server "has anything changed?" every 30 seconds while Obsidian is open (one tiny request; on phones only while the app is in the foreground). An edit on one device usually appears on the others within 10–40 seconds. Seafile has no live co-editing, so you won't see someone else typing; simultaneous edits are merged instead.
 
 ## Compatibility
 
@@ -66,10 +82,6 @@ A sync runs on startup, every N minutes, N seconds after your last edit, and whe
 - **Do not sync the same folder with this plugin and the Seafile desktop client at the same time.** Changes will go back and forth between them.
 - If listing libraries works but file transfers fail, the server's `SERVICE_URL` / `FILE_SERVER_ROOT` is probably misconfigured. Enable *Use server URL for file transfers*.
 - **Show sync log** shows what happened during recent syncs.
-
-### Network use and privacy
-
-The plugin connects only to the Seafile server you configure. Your API token, and the library password if you set one, are stored in this plugin's `data.json` on each device.
 
 ## Development
 

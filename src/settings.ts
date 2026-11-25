@@ -2,6 +2,7 @@ import { App, getLanguage, Notice, Platform, PluginSettingTab, Setting, SettingD
 import { t } from "./i18n";
 import type SeafileSyncPlugin from "./main";
 import { SeafileApi } from "./seafile";
+import { TrashModal } from "./ui";
 import { ConflictStrategy } from "./types";
 
 export interface Settings {
@@ -39,6 +40,20 @@ export interface Settings {
 	syncVideo: boolean;
 	syncPdf: boolean;
 	syncOther: boolean;
+	/** Only these vault folders are synced on this device (one per line; empty = all). */
+	onlyFolders: string;
+	/** Vault folders synced with other libraries / folders. */
+	extraLibraries: ExtraLibrary[];
+	/** Ask the server "anything new?" every N seconds while the app is open (0 = off). */
+	pollSeconds: number;
+	explorerBadges: boolean;
+}
+
+export interface ExtraLibrary {
+	local: string;
+	repoId: string;
+	repoName: string;
+	remote: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -75,6 +90,10 @@ export const DEFAULT_SETTINGS: Settings = {
 	syncVideo: true,
 	syncPdf: true,
 	syncOther: true,
+	onlyFolders: "",
+	extraLibraries: [],
+	pollSeconds: 30,
+	explorerBadges: true,
 };
 
 export const FUNDING_URL = "https://boosty.to/grispy/donate";
@@ -95,6 +114,19 @@ export class SeafileSettingTab extends PluginSettingTab {
 	private otp = "";
 	private pastedToken = "";
 	private libraries: { id: string; label: string }[] | null = null;
+	private draft: ExtraLibrary = { local: "", repoId: "", repoName: "", remote: "" };
+
+	private async loadLibraries() {
+		try {
+			const libs = await this.plugin.api().listLibraries();
+			this.libraries = libs
+				.filter((l) => !l.encrypted || l.id === this.plugin.settings.repoId)
+				.map((l) => ({ id: l.id, label: l.name + (l.encrypted ? " 🔒" : "") + (l.permission === "r" ? " (read-only)" : "") }));
+			this.rerender();
+		} catch (e) {
+			new Notice("❌ Seafile: " + (e as Error).message, 8000);
+		}
+	}
 
 	constructor(app: App, private plugin: SeafileSyncPlugin) {
 		super(app, plugin);
@@ -113,7 +145,8 @@ export class SeafileSettingTab extends PluginSettingTab {
 		else s[key] = typeof value === "string" && key !== "ignore" ? value.trim() : value;
 		if (key === "concurrency") this.plugin.settings.concurrency = Math.min(16, Math.max(1, Number(value) || 1));
 		await this.plugin.saveSettings();
-		if (key === "intervalMinutes") this.plugin.restartTimers();
+		if (key === "intervalMinutes" || key === "pollSeconds") this.plugin.restartTimers();
+		if (key === "explorerBadges") this.plugin.refreshBadges();
 		if (key === "autoSync") this.plugin.setStatus(this.plugin.settings.paused ? "paused" : "idle");
 		if (key === "syncConfigDir") this.refreshDomState();
 	}
@@ -273,15 +306,7 @@ export class SeafileSettingTab extends PluginSettingTab {
 								});
 							});
 							setting.addButton((b) =>
-								b.setButtonText(L("Load libraries", "Загрузить список")).onClick(async () => {
-									try {
-										const libs = await p.api().listLibraries();
-										this.libraries = libs.map((l) => ({ id: l.id, label: l.name + (l.encrypted ? " 🔒" : "") + (l.permission === "r" ? " (read-only)" : "") }));
-										this.rerender();
-									} catch (e) {
-										new Notice("❌ Seafile: " + (e as Error).message, 8000);
-									}
-								})
+								b.setButtonText(L("Load libraries", "Загрузить список")).onClick(() => void this.loadLibraries())
 							);
 						},
 					},
@@ -319,6 +344,14 @@ export class SeafileSettingTab extends PluginSettingTab {
 						name: L("Every N minutes", "Каждые N минут"),
 						desc: L("0 = off. Picks up changes made on other devices.", "0 — выключено. Подхватывает изменения с других устройств."),
 						control: { type: "number", key: "intervalMinutes", min: 0, step: 1 },
+					},
+					{
+						name: L("Check the server every N seconds", "Проверять сервер каждые N секунд"),
+						desc: L(
+							"0 = off. One tiny request while Obsidian is open; changes from other devices arrive within this time.",
+							"0 — выключено. Один маленький запрос, пока Obsidian открыт: правки с других устройств приходят за это время."
+						),
+						control: { type: "number", key: "pollSeconds", min: 0, step: 5 },
 					},
 					{
 						name: L("N seconds after an edit", "Через N секунд после правки"),
@@ -359,6 +392,14 @@ export class SeafileSettingTab extends PluginSettingTab {
 						name: L("📦 Other files", "📦 Прочие файлы"),
 						desc: L("Archives, office documents and everything else.", "Архивы, документы и всё остальное."),
 						control: { type: "toggle", key: "syncOther" },
+					},
+					{
+						name: L("📂 Only these folders on this device", "📂 Только эти папки на этом устройстве"),
+						desc: L(
+							"One folder per line; empty = the whole vault. Notes in the vault root are always synced. Other folders stay on the server and on other devices, nothing is deleted.",
+							"По папке в строке; пусто — всё хранилище. Заметки в корне хранилища синхронизируются всегда. Остальные папки остаются на сервере и на других устройствах, ничего не удаляется."
+						),
+						control: { type: "textarea", key: "onlyFolders", rows: 3, placeholder: L("Notes\nDaily", "Заметки\nДневник") },
 					},
 					{
 						type: "page",
@@ -420,6 +461,132 @@ export class SeafileSettingTab extends PluginSettingTab {
 				],
 			},
 
+			// ------------------------------------------------ more libraries
+			{
+				type: "group",
+				heading: L("More libraries", "Другие библиотеки"),
+				items: [
+					{
+						name: L("Sync a vault folder with another library", "Синхронизировать папку хранилища с другой библиотекой"),
+						desc: L(
+							"For example a shared team library in a “Team” folder. That folder is then left out of the main sync. Encrypted libraries are not supported here.",
+							"Например, общую библиотеку команды в папку «Команда». Эта папка тогда исключается из основной синхронизации. Зашифрованные библиотеки здесь не поддерживаются."
+						),
+					},
+					{
+						name: "",
+						render: (setting: Setting) => {
+							setting.settingEl.addClass("seafile-sync-extra");
+							setting.infoEl.remove();
+							const box = setting.controlEl.createDiv({ cls: "seafile-sync-extra-list" });
+							if (!s.extraLibraries.length) box.createDiv({ cls: "seafile-sync-muted", text: L("None yet.", "Пока нет.") });
+							s.extraLibraries.forEach((x, i) => {
+								new Setting(box)
+									.setName(`📁 ${x.local}  ⇄  ☁️ ${x.repoName || x.repoId}${x.remote ? " / " + x.remote : ""}`)
+									.addExtraButton((b) =>
+										b
+											.setIcon("trash-2")
+											.setTooltip(L("Stop syncing (files stay)", "Перестать синхронизировать (файлы останутся)"))
+											.onClick(async () => {
+												s.extraLibraries.splice(i, 1);
+												await p.saveSettings();
+												this.rerender();
+											})
+									);
+							});
+						},
+					},
+					{
+						name: L("Add", "Добавить"),
+						desc: L("Vault folder, library and (optionally) a folder in it.", "Папка хранилища, библиотека и (необязательно) папка в ней."),
+						render: (setting: Setting) => {
+							setting.addText((tx) => tx.setPlaceholder(L("Vault folder", "Папка хранилища")).setValue(this.draft.local).onChange((v) => (this.draft.local = v.trim())));
+							setting.addDropdown((d) => {
+								d.addOption("", L("Library…", "Библиотека…"));
+								for (const l of this.libraries ?? []) d.addOption(l.id, l.label);
+								d.setValue(this.draft.repoId);
+								d.onChange((v) => {
+									this.draft.repoId = v;
+									this.draft.repoName = (d.selectEl.selectedOptions[0]?.text ?? "").replace(/ 🔒| \(read-only\)/g, "");
+								});
+							});
+							setting.addText((tx) => tx.setPlaceholder(L("Folder in library", "Папка в библиотеке")).setValue(this.draft.remote).onChange((v) => (this.draft.remote = v.trim())));
+							if (!this.libraries)
+								setting.addButton((b) => b.setButtonText(L("Load libraries", "Загрузить список")).onClick(() => void this.loadLibraries()));
+							setting.addButton((b) =>
+								b
+									.setButtonText(L("Add", "Добавить"))
+									.setCta()
+									.onClick(async () => {
+										const local = this.draft.local.replace(/^\/+|\/+$/g, "");
+										if (!local || !this.draft.repoId) {
+											new Notice(L("Choose a vault folder and a library.", "Укажите папку хранилища и библиотеку."));
+											return;
+										}
+										if (local === cfg || local.startsWith(cfg + "/")) {
+											new Notice(L("The settings folder can't be used here.", "Папку настроек использовать нельзя."));
+											return;
+										}
+										const clash = s.extraLibraries.some((x) => x.local === local || x.local.startsWith(local + "/") || local.startsWith(x.local + "/"));
+										if (clash) {
+											new Notice(L("This folder is already synced with another library.", "Эта папка уже синхронизируется с другой библиотекой."));
+											return;
+										}
+										s.extraLibraries.push({ ...this.draft, local });
+										this.draft = { local: "", repoId: "", repoName: "", remote: "" };
+										await p.saveSettings();
+										this.rerender();
+									})
+							);
+						},
+					},
+				],
+			},
+
+			// ------------------------------------------------ tools
+			{
+				type: "group",
+				heading: L("Tools", "Инструменты"),
+				items: [
+					{
+						name: L("🕘 Version history", "🕘 История версий"),
+						desc: L(
+							"Right-click a file → “Seafile: version history”, or run the command “Show version history of this file”.",
+							"Правый клик по файлу → «Seafile: история версий» или команда «Show version history of this file»."
+						),
+					},
+					{
+						name: L("♻️ Restore deleted files", "♻️ Восстановить удалённые файлы"),
+						desc: L("From the Seafile trash of the main library.", "Из корзины Seafile основной библиотеки."),
+						render: (setting: Setting) => {
+							setting.addButton((b) => b.setButtonText(L("Open trash", "Открыть корзину")).onClick(() => new TrashModal(this.app, p).open()));
+						},
+					},
+					{
+						name: L("📱 Settings of this device", "📱 Настройки этого устройства"),
+						desc: L(
+							"Every device keeps its own settings. Save them to the server to copy them to a new device (login and library are not copied).",
+							"У каждого устройства свои настройки. Сохраните их на сервер, чтобы скопировать на новое устройство (вход и библиотека не копируются)."
+						),
+						render: (setting: Setting) => {
+							setting.addButton((b) => b.setButtonText(L("Save to server", "Сохранить на сервер")).onClick(() => void p.saveProfile()));
+							setting.addButton((b) =>
+								b.setButtonText(L("Copy from a device…", "Скопировать с устройства…")).onClick(async () => {
+									await p.loadProfile();
+									this.rerender();
+								})
+							);
+						},
+					},
+					{
+						name: L("📜 Sync log", "📜 Журнал синхронизации"),
+						render: (setting: Setting) => {
+							setting.addButton((b) => b.setButtonText(L("Show", "Показать")).onClick(() => p.showLog()));
+						},
+					},
+				],
+			},
+
 			// ------------------------------------------------ safety
 			{
 				type: "group",
@@ -469,6 +636,11 @@ export class SeafileSettingTab extends PluginSettingTab {
 										none: L("None", "Без уведомлений"),
 									},
 								},
+							},
+							{
+								name: L("Show sync status in the file explorer", "Показывать статус в списке файлов"),
+								desc: L("A dot next to files not synced yet, ⚠️ next to conflict copies.", "Точка у ещё не синхронизированных файлов, ⚠️ у копий конфликтов."),
+								control: { type: "toggle", key: "explorerBadges" },
 							},
 							{ name: L("Parallel transfers", "Параллельных передач"), control: { type: "number", key: "concurrency", min: 1, max: 16, step: 1 } },
 							{
