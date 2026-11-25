@@ -1,0 +1,36 @@
+name: Release
+
+# Push a tag equal to the version in manifest.json (e.g. 1.0.1, no "v")
+# and this builds the plugin and publishes a GitHub release with
+# main.js, manifest.json and styles.css — what Obsidian downloads.
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Check tag matches manifest
+        run: |
+          v=$(node -p "require('./manifest.json').version")
+          [ "$v" = "${GITHUB_REF_NAME}" ] || { echo "Tag ${GITHUB_REF_NAME} != manifest $v"; exit 1; }
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir seafile-vault-sync && cp main.js manifest.json styles.css seafile-vault-sync/
+          zip -r seafile-vault-sync-${GITHUB_REF_NAME}.zip seafile-vault-sync
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes \
+            main.js manifest.json styles.css seafile-vault-sync-${GITHUB_REF_NAME}.zip
