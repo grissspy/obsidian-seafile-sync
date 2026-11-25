@@ -75,3 +75,7 @@ npm run dev     # пересборка при изменениях
 Выпуск версии: `npm version patch` (обновит manifest.json и versions.json, создаст коммит и тег), затем `git push --follow-tags`. GitHub Actions соберёт плагин и опубликует релиз.
 
 Код: `src/sync.ts` — алгоритм, `src/seafile.ts` — клиент API, `src/merge.ts` — трёхстороннее слияние, `src/local.ts` — работа с хранилищем, `src/main.ts` — плагин и интерфейс.
+
+## Поддержать
+
+Если плагин экономит вам время, можно поддержать разработку на [Boosty](https://boosty.to/grispy/donate) ☕

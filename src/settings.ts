@@ -447,5 +447,10 @@ export class SeafileSettingTab extends PluginSettingTab {
 						new Notice("Seafile: sync state reset");
 					})
 			);
+
+		new Setting(containerEl)
+			.setName("Support development")
+			.setDesc("If the plugin saves you time, you can buy the author a coffee.")
+			.addButton((b) => b.setButtonText("☕ Boosty").onClick(() => window.open("https://boosty.to/grispy/donate")));
 	}
 }

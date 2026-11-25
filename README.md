@@ -69,3 +69,7 @@ To release, run `npm version patch` followed by `git push --follow-tags`. GitHub
 Layout: `src/sync.ts` (algorithm), `src/seafile.ts` (API client), `src/merge.ts` (three-way merge), `src/local.ts` (vault access), `src/main.ts` (plugin and UI).
 
 License: MIT.
+
+## Support
+
+If the plugin saves you time, you can support development on [Boosty](https://boosty.to/grispy/donate) ☕
