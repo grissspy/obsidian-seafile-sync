@@ -152,7 +152,13 @@ export class SeafileApi {
 			headers: { Authorization: `Token ${this.token}`, Accept: "application/json", ...(init.headers || {}) },
 		});
 		if (!okStatuses.includes(res.status)) {
-			let detail = res.text?.slice(0, 300) ?? "";
+			let detail = res.text ?? "";
+			if (/^\s*</.test(detail)) {
+				// An HTML error page (proxy or server crash): keep only its title.
+				const m = /<title>([^<]*)<\/title>/i.exec(detail) || /<h1>([^<]*)<\/h1>/i.exec(detail);
+				detail = m ? m[1].trim() : "";
+			}
+			detail = detail.slice(0, 300);
 			try {
 				const j = parse<ApiError>(res.text);
 				detail = j.error_msg || j.detail || detail;
@@ -234,9 +240,25 @@ export class SeafileApi {
 
 	/** Object id of a file, or null if missing. */
 	async fileId(repo: string, absPath: string): Promise<string | null> {
-		const res = await this.call(`/api2/repos/${repo}/file/detail/?p=${encodeURIComponent(absPath)}`, {}, [200, 404]);
-		if (res.status === 404) return null;
-		return parse<{ id?: string }>(res.text).id ?? null;
+		try {
+			const res = await this.call(`/api2/repos/${repo}/file/detail/?p=${encodeURIComponent(absPath)}`, {}, [200, 404]);
+			if (res.status === 404) return null;
+			return parse<{ id?: string }>(res.text).id ?? null;
+		} catch (e) {
+			// Some servers fail on this call for certain names (e.g. emoji with a non-utf8mb4 database).
+			// The folder listing still works, so take the id from there.
+			if (!(e instanceof SeafileError) || e.status < 500) throw e;
+			const i = absPath.lastIndexOf("/");
+			const name = absPath.slice(i + 1);
+			let entries: DirEntry[];
+			try {
+				entries = await this.listDir(repo, absPath.slice(0, i) || "/");
+			} catch (e2) {
+				if (e2 instanceof SeafileError && e2.status === 404) return null;
+				throw e;
+			}
+			return entries.find((x) => x.type === "file" && x.name === name)?.id ?? null;
+		}
 	}
 
 	async downloadLink(repo: string, absPath: string): Promise<string> {

@@ -12,6 +12,8 @@ function resp(status: number, body: string | ArrayBuffer, headers: Record<string
 }
 
 export class MockSeafile {
+	/** Answer file/detail with an HTML 500 page for names with emoji (seen on real servers). */
+	brokenDetail = false;
 	files = new Map<string, { data: Uint8Array; id: string; mtime: number }>(); // abs path
 	dirs = new Set<string>(["/"]);
 	version = 1;
@@ -189,6 +191,8 @@ export class MockSeafile {
 			}
 		}
 		if (u.pathname === `/api2/repos/${this.repo}/file/detail/`) {
+			if (this.brokenDetail && /\p{Extended_Pictographic}/u.test(p!))
+				return resp(500, '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <title>Page unavailable</title>\n</head><body><h1>Page unavailable</h1></body></html>');
 			const f = this.files.get(p!);
 			return f ? resp(200, JSON.stringify({ id: f.id, size: f.data.length, mtime: f.mtime })) : resp(404, '{"error_msg":"File not found"}');
 		}

@@ -399,6 +399,32 @@ async function main() {
 		check("isExcalidraw", isExcalidraw("a/b.excalidraw.md") && isExcalidraw("x.excalidraw") && !isExcalidraw("note.md"));
 	}
 
+	// ---------------- server that fails file/detail for emoji names
+	{
+		const S6 = new MockSeafile();
+		S6.brokenDetail = true;
+		const X = new Device("PC", S6);
+		const Y = new Device("Phone", S6);
+		X.local.set("Работа/📁 Задачи.md", "a\nb\nc\n");
+		await X.sync();
+		await Y.sync();
+		X.local.set("Работа/📁 Задачи.md", "A\nb\nc\n");
+		Y.local.set("Работа/📁 Задачи.md", "a\nb\nC\n");
+		const rx = await X.sync();
+		const ry = await Y.sync();
+		check("emoji path: no errors when file/detail fails", !rx.errors.length && !ry.errors.length, [rx.errors, ry.errors]);
+		check("emoji path: merged", Y.local.text("Работа/📁 Задачи.md") === "A\nb\nC\n", Y.local.text("Работа/📁 Задачи.md"));
+		const html = async () => ({ status: 500, text: "<!DOCTYPE html>\n<html><head><title>Page unavailable</title></head></html>", arrayBuffer: new ArrayBuffer(0), headers: {} });
+		const api = new SeafileApi(html as unknown as typeof S6.http, "https://seaf.test", "T");
+		let msg = "";
+		try {
+			await api.downloadLink("r", "/x");
+		} catch (e) {
+			msg = String((e as Error).message);
+		}
+		check("HTML error page is shortened", !msg.includes("<"), msg);
+	}
+
 	// ---------------- conflict names
 	{
 		const n = formatConflictName("dir/My note.md", "Pixel 10", new Date(2026, 10, 25, 9, 5, 7));
