@@ -276,7 +276,7 @@ type Choice = "mine" | "theirs" | "both";
 export class ConflictModal extends Modal {
 	private choices: Choice[] = [];
 
-	constructor(app: App, private plugin: SeafileSyncPlugin, private main: TFile, private copy: TFile, private device: string) {
+	constructor(app: App, private plugin: SeafileSyncPlugin, private main: TFile, private copy: TFile, private device: string, private onDone?: () => void) {
 		super(app);
 	}
 
@@ -344,7 +344,8 @@ export class ConflictModal extends Modal {
 				await this.app.fileManager.trashFile(this.copy);
 				new Notice(t("cfDone"));
 				this.close();
-				void this.plugin.sync("manual");
+				if (this.onDone) this.onDone();
+				else void this.plugin.sync("manual");
 			} catch (e) {
 				new Notice("❌ Seafile: " + (e as Error).message, 8000);
 			}
@@ -368,6 +369,165 @@ export function findConflict(app: App, file: TFile): { main: TFile; copy: TFile;
 		.sort((x, y) => y.stat.mtime - x.stat.mtime);
 	if (!copies.length) return null;
 	return { main: file, copy: copies[0], device: parseConflictName(copies[0].path)!.device };
+}
+
+// ------------------------------------------------------------------ take the server version
+
+/** Show what would change, then overwrite the local file with the server's current version. */
+export class PullModal extends Modal {
+	constructor(app: App, private plugin: SeafileSyncPlugin, private file: TFile) {
+		super(app);
+	}
+
+	async onOpen() {
+		this.titleEl.setText(t("pullTitle", { name: this.file.name }));
+		this.modalEl.addClass("seafile-sync-wide");
+		const el = this.contentEl;
+		el.createEl("p", { cls: "seafile-sync-muted", text: t("pullIntro") });
+		if (this.plugin.isPending(this.file.path)) el.createEl("p", { cls: "seafile-sync-warn", text: t("pullUnsynced") });
+		const view = el.createDiv({ text: t("loading") });
+		const where = this.plugin.resolveRemote(this.file.path);
+		if (!where) return void view.setText(t("notSynced"));
+		let server: ArrayBuffer;
+		try {
+			const api = this.plugin.api();
+			if (!(await api.fileId(where.repo, where.abs))) return void view.setText(t("pullMissing"));
+			server = await api.fetchUrl(await api.downloadLink(where.repo, where.abs));
+		} catch (e) {
+			return void view.setText("❌ " + (e as Error).message);
+		}
+		view.empty();
+		const local = await this.app.vault.readBinary(this.file);
+		if (this.plugin.isTextPath(this.file.path) && looksLikeText(server) && looksLikeText(local)) {
+			renderDiff(view, toText(local), toText(server), t("pullLocal"), t("pullServer"));
+		} else {
+			view.createEl("p", { text: `${t("pullLocal")}: ${size(local.byteLength)} · ${t("pullServer")}: ${size(server.byteLength)}` });
+		}
+		const row = el.createDiv({ cls: "modal-button-container" });
+		row.createEl("button", { text: t("cfCancel") }).onclick = () => this.close();
+		const go = row.createEl("button", { text: t("pullApply"), cls: "mod-warning" });
+		go.onclick = async () => {
+			go.disabled = true;
+			try {
+				const r = await this.plugin.pullFromServer(this.file.path);
+				new Notice(r === "missing" ? t("pullMissing") : r === "same" ? t("pullSame") : t("pullDone", { name: this.file.name }));
+				this.close();
+			} catch (e) {
+				go.disabled = false;
+				new Notice("❌ Seafile: " + (e as Error).message, 8000);
+			}
+		};
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+// ------------------------------------------------------------------ all conflicts
+
+/** A "(conflict …)" copy and the file it belongs to (null if that one is gone). */
+export interface ConflictCopy {
+	copy: TFile;
+	main: TFile | null;
+	original: string;
+	device: string;
+}
+
+/** Every "(conflict …)" copy in the vault, with one-click ways to settle each. */
+export class ConflictsModal extends Modal {
+	private changed = false;
+	private confirmAll = false;
+
+	constructor(app: App, private plugin: SeafileSyncPlugin, private onClosed?: () => void) {
+		super(app);
+	}
+
+	onOpen() {
+		this.titleEl.setText(t("cflTitle"));
+		this.modalEl.addClass("seafile-sync-wide");
+		this.render();
+	}
+
+	private render() {
+		const el = this.contentEl;
+		el.empty();
+		const list = this.plugin.listConflicts();
+		if (!list.length) {
+			el.createEl("p", { text: t("cflNone") });
+			return;
+		}
+		el.createEl("p", { cls: "seafile-sync-muted", text: t("cflIntro", { n: list.length }) });
+		for (const c of list) this.row(el, c);
+		const withMain = list.filter((c) => c.main);
+		if (withMain.length > 1) {
+			const row = el.createDiv({ cls: "modal-button-container" });
+			const b = row.createEl("button", { text: this.confirmAll ? t("cflAllSure", { n: withMain.length }) : t("cflAllMain"), cls: this.confirmAll ? "mod-warning" : "" });
+			b.onclick = () => {
+				if (!this.confirmAll) {
+					this.confirmAll = true;
+					return this.render();
+				}
+				this.confirmAll = false;
+				void this.act(async () => {
+					for (const c of withMain) await this.app.fileManager.trashFile(c.copy);
+				});
+			};
+		}
+	}
+
+	private row(el: HTMLElement, c: ConflictCopy) {
+		const s = new Setting(el).setName(c.original);
+		const desc = [t("cfCopy", { device: c.device }), when(c.copy.stat.mtime), size(c.copy.stat.size)];
+		if (!c.main) desc.push(t("cflNoMain"));
+		s.setDesc(desc.join(" · "));
+		s.settingEl.addClass("seafile-sync-conflict-row");
+		if (c.main && this.plugin.isTextPath(c.original)) {
+			const main = c.main;
+			s.addButton((b) =>
+				b
+					.setButtonText(t("cflCompare"))
+					.setCta()
+					.onClick(() => new ConflictModal(this.app, this.plugin, main, c.copy, c.device, () => void this.act(async () => {})).open())
+			);
+		}
+		s.addExtraButton((b) =>
+			b
+				.setIcon("file-search")
+				.setTooltip(t("cflOpen"))
+				.onClick(() => {
+					void this.app.workspace.getLeaf("tab").openFile(c.copy);
+					this.close();
+				})
+		);
+		if (c.main) s.addButton((b) => b.setButtonText(t("cflKeepMain")).onClick(() => void this.act(() => this.app.fileManager.trashFile(c.copy))));
+		s.addButton((b) =>
+			b.setButtonText(c.main ? t("cflKeepCopy") : t("cflRestoreCopy")).onClick(() =>
+				void this.act(async () => {
+					if (c.main) {
+						await this.app.vault.modifyBinary(c.main, await this.app.vault.readBinary(c.copy));
+						await this.app.fileManager.trashFile(c.copy);
+					} else await this.app.fileManager.renameFile(c.copy, c.original);
+				})
+			)
+		);
+	}
+
+	private async act(fn: () => Promise<void>) {
+		try {
+			await fn();
+			this.changed = true;
+		} catch (e) {
+			new Notice("❌ Seafile: " + (e as Error).message, 8000);
+		}
+		this.render();
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		if (this.changed) void this.plugin.sync("change");
+		this.onClosed?.();
+	}
 }
 
 // ------------------------------------------------------------------ device profiles

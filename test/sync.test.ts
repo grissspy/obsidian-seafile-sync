@@ -31,6 +31,12 @@ class Device {
 	constructor(public name: string, public server: MockSeafile, public conflict: ConflictStrategy = "merge", public folder = "Vault", public ignore: string[] = []) {}
 
 	async sync() {
+		const r = await (await this.engine()).run();
+		if (r.errors.length) console.log(this.name, "errors:", r.errors);
+		return r;
+	}
+
+	async engine() {
 		const api = new SeafileApi(this.server.http, "https://seaf.test/", "T");
 		const remote = new SeafileRemote(api, this.server.repo, this.folder);
 		await remote.prepare();
@@ -55,9 +61,7 @@ class Device {
 				this.state = JSON.parse(JSON.stringify(s));
 			},
 		});
-		const r = await eng.run();
-		if (r.errors.length) console.log(this.name, "errors:", r.errors);
-		return r;
+		return eng;
 	}
 }
 
@@ -454,6 +458,41 @@ async function main() {
 		await W2.sync();
 		await W.sync();
 		check("prefix: delete propagates, outside untouched", !W.local.text("Work/plan.md") && W.local.text("main.md") === "main vault note");
+	}
+
+	// ---------------- saved without changes: recorded mtime is refreshed (no endless "not synced")
+	{
+		const S5 = new MockSeafile();
+		const D = new Device("PC", S5);
+		D.local.set("Креды.md", "secret");
+		await D.sync();
+		const before = D.state.files["Креды.md"].lm;
+		D.local.files.get("Креды.md")!.mtime += 124_721; // touched, same bytes
+		const r = await D.sync();
+		const st = D.state.files["Креды.md"];
+		check("touch: nothing transferred", r.uploaded === 0 && r.downloaded === 0, r);
+		check("touch: mtime refreshed in state", st.lm === D.local.files.get("Креды.md")!.mtime && st.lm !== before, st);
+	}
+
+	// ---------------- take the server version by hand
+	{
+		const S6 = new MockSeafile();
+		const A6 = new Device("PC", S6);
+		const B6 = new Device("Phone", S6);
+		A6.local.set("p.md", "base\n");
+		await A6.sync();
+		await B6.sync();
+		B6.local.set("p.md", "phone edit\n");
+		await B6.sync();
+		A6.local.set("p.md", "pc edit, not synced\n");
+		const r = await (await A6.engine()).pullFile("p.md");
+		check("pull: replaced", r === "pulled" && A6.local.text("p.md") === "phone edit\n", [r, A6.local.text("p.md")]);
+		const after = await A6.sync();
+		check("pull: next sync has nothing to do", after.uploaded + after.downloaded + after.merged + after.conflicts === 0 && S6.get("/Vault/p.md") === "phone edit\n", after);
+		check("pull: same", (await (await A6.engine()).pullFile("p.md")) === "same");
+		check("pull: missing on server", (await (await A6.engine()).pullFile("nope.md")) === "missing");
+		S6.put("/Vault/only-server.md", "fresh");
+		check("pull: file absent locally", (await (await A6.engine()).pullFile("only-server.md")) === "pulled" && A6.local.text("only-server.md") === "fresh");
 	}
 
 	// ---------------- history, trash, share links

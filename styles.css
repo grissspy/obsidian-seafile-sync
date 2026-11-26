@@ -36,3 +36,5 @@ body.seafile-sync-badges .nav-file-title[data-path*=" (conflict "] .nav-file-tit
 .seafile-sync-extra-add { flex-wrap: wrap; gap: 8px; }
 .seafile-sync-extra-add .setting-item-control { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; gap: 8px; }
 .seafile-sync-extra-add .setting-item-control input[type="text"] { width: 12em; }
+.seafile-sync-warn { color: var(--text-warning); }
+.seafile-sync-conflict-row .setting-item-control { flex-wrap: wrap; justify-content: flex-end; }

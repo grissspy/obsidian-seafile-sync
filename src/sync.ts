@@ -108,6 +108,9 @@ export class SyncEngine {
 
 		// Which local files changed since last sync?
 		const localChanged = new Set<string>();
+		// Files whose mtime moved but content did not (saved without edits, touched by another
+		// app): refresh their recorded size/mtime, or they look "not synced" forever.
+		let metaRefreshed = false;
 		for (const [p, f] of L) {
 			const s = state.files[p];
 			if (!s) {
@@ -120,6 +123,11 @@ export class SyncEngine {
 			}
 			try {
 				if ((await this.localHash(p)) !== s.lh) localChanged.add(p);
+				else {
+					s.lm = f.mtime;
+					s.ls = f.size;
+					metaRefreshed = true;
+				}
 			} catch (e) {
 				res.errors.push(`${p}: cannot read (${(e as Error).message})`);
 			}
@@ -131,7 +139,7 @@ export class SyncEngine {
 
 		const filtersChanged = (state.filterKey ?? "") !== opt.filterKey;
 		if (!anyLocalChange && !filtersChanged && tokenBefore && tokenBefore === state.changeToken) {
-			if (forgot) await opt.saveState(state);
+			if (forgot || metaRefreshed) await opt.saveState(state);
 			res.skipped = true;
 			return res;
 		}
@@ -265,6 +273,26 @@ export class SyncEngine {
 			/* not critical */
 		}
 		return res;
+	}
+
+	/**
+	 * Replace the local file with the server's current version and record it as synced
+	 * (a manual "take the server version"). Returns "missing" if the server has no such file,
+	 * "same" if the local file already had that content. Must not run during run().
+	 */
+	async pullFile(path: string): Promise<"pulled" | "same" | "missing"> {
+		// Object id first, then the data: if the server changes in between, the state names the
+		// older id, so the next sync sees "changed on server" and downloads the newer one.
+		const rid = await this.remote.stat(path);
+		if (rid === null) return "missing";
+		const data = await this.remote.download(path);
+		const hash = await sha256(data);
+		const cur = (await this.local.stat(path)) ? await sha256(await this.local.read(path)) : null;
+		if (cur !== hash && !(await this.safeLocalWrite(path, data, cur))) throw new Error("the file changed while downloading, try again");
+		await this.record(path, data, hash, rid);
+		await this.opt.saveState(this.state);
+		this.opt.log(`↓ ${path} (taken from the server by hand)`);
+		return cur === hash ? "same" : "pulled";
 	}
 
 	private async exec(a: Action, res: SyncResult): Promise<void> {

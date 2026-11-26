@@ -2,7 +2,7 @@ import { App, getLanguage, Notice, Platform, PluginSettingTab, Setting, SettingD
 import { t } from "./i18n";
 import type SeafileSyncPlugin from "./main";
 import { SeafileApi } from "./seafile";
-import { TrashModal } from "./ui";
+import { ConflictsModal, TrashModal } from "./ui";
 import { ConflictStrategy } from "./types";
 
 export interface Settings {
@@ -555,6 +555,26 @@ export class SeafileSettingTab extends PluginSettingTab {
 							"Right-click a file → “Seafile: version history”, or run the command “Show version history of this file”.",
 							"Правый клик по файлу → «Seafile: история версий» или команда «Show version history of this file»."
 						),
+					},
+					{
+						name: L("⬇️ Take the server version", "⬇️ Взять версию с сервера"),
+						desc: L(
+							"Replace a file on this device with the one on the server: right-click it → “Seafile: replace with the server version”, or run the command “Replace this file with the server version”.",
+							"Заменить файл на этом устройстве версией с сервера: правый клик по файлу → «Seafile: заменить версией с сервера» или команда «Replace this file with the server version»."
+						),
+					},
+					{
+						name: L("🔀 Sync conflicts", "🔀 Конфликты синхронизации"),
+						desc: L("All “(conflict …)” copies in one list: compare, keep one side, or restore.", "Все копии «(conflict …)» одним списком: сравнить, оставить одну из версий или восстановить."),
+						render: (setting: Setting) => {
+							const n = p.listConflicts().length;
+							setting.addButton((b) => {
+								b.setButtonText(n ? L(`Resolve (${n})`, `Разобрать (${n})`) : L("Open", "Открыть")).onClick(() =>
+									new ConflictsModal(this.app, p, () => this.rerender()).open()
+								);
+								if (n) b.setCta();
+							});
+						},
 					},
 					{
 						name: L("♻️ Restore deleted files", "♻️ Восстановить удалённые файлы"),

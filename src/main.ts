@@ -5,10 +5,10 @@ import { t } from "./i18n";
 import { Http, SeafileApi, SeafileError, SeafileRemote } from "./seafile";
 import { DEFAULT_SETTINGS, SeafileSettingTab, Settings } from "./settings";
 import { PrefixLocal } from "./prefix";
-import { ConflictModal, findConflict, HistoryModal, ProfilePicker, TrashModal } from "./ui";
+import { ConflictCopy, ConflictModal, ConflictsModal, findConflict, HistoryModal, ProfilePicker, PullModal, TrashModal } from "./ui";
 import { emptyState, SyncEngine } from "./sync";
 import { LocalFS, SyncResult, SyncState } from "./types";
-import { extOf, globToRegExp, normalizeRel } from "./util";
+import { extOf, globToRegExp, normalizeRel, parseConflictName } from "./util";
 
 const NOTE_EXT = new Set(["md", "canvas", "base"]);
 const TEXT_EXT = new Set(["md", "txt", "canvas", "base", "json", "css", "js", "csv", "html", "xml", "yml", "yaml", "svg"]);
@@ -139,6 +139,17 @@ export default class SeafileSyncPlugin extends Plugin {
 			},
 		});
 		this.addCommand({
+			id: "pull-from-server",
+			name: "Replace this file with the server version",
+			checkCallback: (checking) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f || !this.isConfigured() || !this.resolveRemote(f.path)) return false;
+				if (!checking) new PullModal(this.app, this, f).open();
+				return true;
+			},
+		});
+		this.addCommand({ id: "show-conflicts", name: "Show all sync conflicts", callback: () => new ConflictsModal(this.app, this).open() });
+		this.addCommand({
 			id: "copy-share-link",
 			name: "Copy share link of this file",
 			checkCallback: (checking) => {
@@ -155,6 +166,7 @@ export default class SeafileSyncPlugin extends Plugin {
 			this.app.workspace.on("file-menu", (menu: Menu, f: TAbstractFile) => {
 				if (!(f instanceof TFile) || !this.isConfigured() || !this.resolveRemote(f.path)) return;
 				menu.addItem((i) => i.setTitle(t("menuHistory")).setIcon("history").setSection("action").onClick(() => new HistoryModal(this.app, this, f).open()));
+				menu.addItem((i) => i.setTitle(t("menuPull")).setIcon("cloud-download").setSection("action").onClick(() => new PullModal(this.app, this, f).open()));
 				menu.addItem((i) => i.setTitle(t("menuShare")).setIcon("link").setSection("action").onClick(() => void this.copyShareLink(f)));
 				const c = this.isTextPath(f.path) ? findConflict(this.app, f) : null;
 				if (c) menu.addItem((i) => i.setTitle(t("menuConflict")).setIcon("git-merge").setSection("action").onClick(() => new ConflictModal(this.app, this, c.main, c.copy, c.device).open()));
@@ -530,18 +542,20 @@ export default class SeafileSyncPlugin extends Plugin {
 		this.badgesSoon();
 	}
 
+	/** Synced file that changed on this device since the last sync (orange badge). */
+	isPending(path: string): boolean {
+		const f = this.app.vault.getFileByPath(path);
+		const st = this.synced.get(path);
+		return !!f && this.isWatched(path) && (!st || st.m !== f.stat.mtime || st.s !== f.stat.size);
+	}
+
 	refreshBadges() {
 		const on = this.settings.explorerBadges && this.isConfigured();
 		document.body.toggleClass("seafile-sync-badges", on);
 		for (const leaf of this.app.workspace.getLeavesOfType("file-explorer")) {
 			leaf.view.containerEl.querySelectorAll<HTMLElement>(".nav-file-title[data-path]").forEach((el) => {
 				const path = el.dataset.path ?? "";
-				let pending = false;
-				if (on && this.indexReady) {
-					const f = this.app.vault.getFileByPath(path);
-					const st = this.synced.get(path);
-					pending = !!f && this.isWatched(path) && (!st || st.m !== f.stat.mtime || st.s !== f.stat.size);
-				}
+				const pending = on && this.indexReady && this.isPending(path);
 				if (el.hasClass("seafile-sync-pending") !== pending) {
 					el.toggleClass("seafile-sync-pending", pending);
 					if (pending) el.setAttr("data-seafile-tip", t("badgePending"));
@@ -682,6 +696,13 @@ export default class SeafileSyncPlugin extends Plugin {
 	}
 
 	private async runTarget(tg: Target, api: SeafileApi): Promise<SyncResult> {
+		const { engine, finish } = await this.makeEngine(tg, api);
+		const r = await engine.run();
+		finish();
+		return r;
+	}
+
+	private async makeEngine(tg: Target, api: SeafileApi): Promise<{ engine: SyncEngine; finish: () => void }> {
 		const s = this.settings;
 		const remote = new SeafileRemote(api, tg.repoId, tg.remoteFolder, tg.id === "main" ? this.getRepoPassword() || undefined : undefined);
 		await remote.prepare();
@@ -717,9 +738,45 @@ export default class SeafileSyncPlugin extends Plugin {
 				return this.saveState(tg, st);
 			},
 		});
-		const r = await engine.run();
-		this.remember(tg, saved);
-		return r;
+		return { engine, finish: () => this.remember(tg, saved) };
+	}
+
+	// ---------- manual actions on one file
+
+	/** Overwrite a vault file with the server's current version and mark it synced. */
+	async pullFromServer(path: string): Promise<"pulled" | "same" | "missing"> {
+		const tg = this.targetFor(path);
+		if (!tg || !this.resolveRemote(path)) throw new Error(t("notSynced"));
+		if (this.syncing) throw new Error(t("alreadyRunning"));
+		this.syncing = true;
+		this.setStatus("sync");
+		try {
+			const { engine, finish } = await this.makeEngine(tg, this.api());
+			const r = await engine.pullFile(tg.local ? path.slice(tg.local.length + 1) : path);
+			finish();
+			this.setStatus("ok", fmt("LT"));
+			return r;
+		} catch (e) {
+			this.setStatus("error");
+			throw e;
+		} finally {
+			this.syncing = false;
+			this.refreshBadges();
+			if (this.pending) {
+				this.pending = false;
+				window.setTimeout(() => void this.sync("change"), 2000);
+			}
+		}
+	}
+
+	/** Every conflict copy in the vault, newest first. */
+	listConflicts(): ConflictCopy[] {
+		const out: ConflictCopy[] = [];
+		for (const f of this.app.vault.getFiles()) {
+			const c = parseConflictName(f.path);
+			if (c) out.push({ copy: f, main: this.app.vault.getFileByPath(c.original), original: c.original, device: c.device });
+		}
+		return out.sort((a, b) => b.copy.stat.mtime - a.copy.stat.mtime);
 	}
 
 	private progress(done: number, total: number) {
