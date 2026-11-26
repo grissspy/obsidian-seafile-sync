@@ -1,7 +1,7 @@
 {
   "id": "seafile-vault-sync",
   "name": "Seafile Vault Sync",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "minAppVersion": "1.13.0",
   "description": "Two-way sync of your vault with a Seafile server on desktop and mobile. Merges notes edited on several devices, version history, trash restore and a conflict helper.",
   "author": "grissspy",
