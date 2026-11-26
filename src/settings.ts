@@ -131,6 +131,7 @@ export class SeafileSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: SeafileSyncPlugin) {
 		super(app, plugin);
 		this.icon = "cloud";
+		this.containerEl.addClass("seafile-sync-settings");
 	}
 
 	// ---- values: plugin.settings, plus a virtual "autoSync" = !paused
