@@ -80,10 +80,22 @@ function writeVault(serverUrl: string, lang: string) {
 async function launch(): Promise<{ proc: ChildProcess; page: Cdp }> {
 	const extra = process.platform === "linux" ? ["--no-sandbox", "--disable-gpu"] : [];
 	const proc = spawn(OBSIDIAN!, [`--user-data-dir=${userData}`, `--remote-debugging-port=${CDP_PORT}`, ...extra], { stdio: "ignore", detached: false });
-	const t = await waitTarget(CDP_PORT, (x) => x.url.includes("index.html"), 90_000);
-	const page = await Cdp.connect(t);
 	// Wait for the vault to load, then turn on community plugins (fresh profile = restricted mode).
-	await page.eval(`for (let i = 0; i < 120 && !(window.app && app.workspace && app.workspace.layoutReady); i++) await new Promise((r) => setTimeout(r, 500)); return true;`);
+	// On a first start the window can reload once (seen on macOS CI), so reconnect if it does.
+	let page!: Cdp;
+	for (let attempt = 1; ; attempt++) {
+		const t = await waitTarget(CDP_PORT, (x) => x.url.includes("index.html"), 90_000);
+		page = await Cdp.connect(t);
+		try {
+			await page.eval(`for (let i = 0; i < 120 && !(window.app && app.workspace && app.workspace.layoutReady); i++) await new Promise((r) => setTimeout(r, 500)); return true;`);
+			break;
+		} catch (e) {
+			if (attempt >= 5 || !/context was destroyed|Cannot find context|closed/i.test(String(e))) throw e;
+			page.close();
+			console.log(`  (window reloaded, reconnecting: ${String(e)})`);
+			await new Promise((r) => setTimeout(r, 2000));
+		}
+	}
 	await page.eval(`
 		app.vault.setConfig("spellcheck", false);
 		if (!app.plugins.isEnabled()) await app.plugins.setEnable(true);
